@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { DataConnection } from 'peerjs';
 import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2, Maximize2, Activity } from 'lucide-react';
@@ -476,8 +475,8 @@ const App: React.FC = () => {
 
   if (screen === AppScreen.SETUP) {
       return (
-        <div className="flex-1 flex flex-col bg-[#008080] p-2 sm:p-4 overflow-y-auto">
-             <Win95Window title="Network Config" className="w-full max-w-lg mx-auto h-full sm:h-auto flex flex-col shadow-[8px_8px_0_rgba(0,0,0,0.5)]">
+        <div className="flex-1 flex flex-col items-center justify-center bg-[#008080] p-4">
+             <Win95Window title="Network Config" className="w-full max-w-lg shadow-[8px_8px_0_rgba(0,0,0,0.5)] flex flex-col max-h-full">
                 <div className="flex gap-1 p-2 pb-0 bg-[#c0c0c0] shrink-0">
                     <button 
                         onClick={() => switchMode(true)} 
