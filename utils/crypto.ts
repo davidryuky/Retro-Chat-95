@@ -9,12 +9,12 @@ const str2ab = (str: string): ArrayBuffer => {
   return buf;
 };
 
-// Utility to convert ArrayBuffer to string (for checking key validity mostly)
+// Utility to convert ArrayBuffer to string
 const ab2str = (buf: ArrayBuffer): string => {
   return String.fromCharCode.apply(null, Array.from(new Uint8Array(buf)));
 };
 
-// 1. Import the Key Material (the password user types)
+// 1. Import the Key Material
 const getKeyMaterial = (password: string): Promise<CryptoKey> => {
   const enc = new TextEncoder();
   return window.crypto.subtle.importKey(
@@ -26,13 +26,9 @@ const getKeyMaterial = (password: string): Promise<CryptoKey> => {
   );
 };
 
-// 2. Derive the AES-GCM Key from the password
+// 2. Derive the AES-GCM Key
 const getKey = (keyMaterial: CryptoKey, salt: Uint8Array = new Uint8Array(16)): Promise<CryptoKey> => {
-  // In a real app, salt should be random and shared. 
-  // For this simplified P2P demo without a complex handshake, 
-  // we will use a static salt derived from the room ID or a fixed value for simplicity 
-  // to ensure both parties generate the same key from the same password.
-  // We'll use a fixed salt for this demo to ensure connectability with just the password.
+  // Fixed salt for P2P simplicity without handshake
   const fixedSalt = new TextEncoder().encode("RETRO_CHAT_FIXED_SALT_V1"); 
 
   return window.crypto.subtle.deriveKey(
@@ -93,18 +89,9 @@ export const decryptMessage = async (payload: { iv: number[]; data: number[] }, 
 
     return new TextDecoder().decode(decryptedContent);
   } catch (e) {
-    console.error("Decryption failed - likely wrong key", e);
+    console.error("Decryption failed", e);
     return "?? [Decryption Failed] ??";
   }
-};
-
-export const generateRandomKey = (): string => {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let result = '';
-  for (let i = 0; i < 12; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
 };
 
 export const generateRandomName = (): string => {
@@ -116,43 +103,56 @@ export const generateRandomName = (): string => {
   return `${adj}${noun}${num}`;
 };
 
-// --- Connection Code Helpers ---
+// --- SHORT CODE LOGIC ---
 
-const SEPARATOR = '$';
+const ID_LENGTH = 6;
+const KEY_LENGTH = 6;
+const PEER_PREFIX = 'rc95-'; // Namespace to avoid collisions on public PeerServer
 
-export const encodeConnectionCode = (peerId: string, key: string): string => {
-  try {
-    const raw = `${peerId}${SEPARATOR}${key}`;
-    return btoa(raw); // Base64 encode
-  } catch (e) {
-    console.error("Failed to encode connection code", e);
-    return "";
+// Generates a 12-char alphanumeric code (6 for ID, 6 for Key)
+export const generateSessionCode = (): string => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'; // No ambiguous chars (I, l, 1, O, 0)
+  let result = '';
+  const totalLength = ID_LENGTH + KEY_LENGTH;
+  for (let i = 0; i < totalLength; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
   }
+  return result;
 };
 
-export const decodeConnectionCode = (code: string): { peerId: string, key: string } | null => {
+// Parses the 12-char code into PeerID and Key
+export const parseSessionCode = (code: string): { peerId: string, key: string, rawCode: string } | null => {
   try {
-    // If user pasted a full URL, try to extract the 'join' param
-    let cleanCode = code;
-    if (code.includes('?join=')) {
-        const urlParams = new URLSearchParams(code.split('?')[1]);
-        cleanCode = urlParams.get('join') || code;
-    } else if (code.includes('http')) {
-        // Fallback for simple paste
+    // 1. Clean the code (remove URL params, spaces, etc)
+    let clean = code.trim();
+    
+    // Handle URL pastes
+    if (clean.includes('join=')) {
+        const urlParams = new URLSearchParams(clean.split('?')[1]);
+        clean = urlParams.get('join') || clean;
+    } else if (clean.includes('http')) {
         try {
-            const url = new URL(code);
-            cleanCode = url.searchParams.get('join') || code;
+            const url = new URL(clean);
+            clean = url.searchParams.get('join') || clean;
         } catch {}
     }
 
-    const raw = atob(cleanCode);
-    const parts = raw.split(SEPARATOR);
-    if (parts.length === 2) {
-      return { peerId: parts[0], key: parts[1] };
+    // Remove any non-alphanumeric chars usually found in these codes if user typed them manually
+    clean = clean.replace(/[^a-zA-Z0-9]/g, '');
+
+    if (clean.length < (ID_LENGTH + KEY_LENGTH)) {
+        return null;
     }
-    return null;
+
+    const idPart = clean.substring(0, ID_LENGTH);
+    const keyPart = clean.substring(ID_LENGTH, ID_LENGTH + KEY_LENGTH);
+
+    return {
+        peerId: `${PEER_PREFIX}${idPart}`,
+        key: keyPart,
+        rawCode: clean.substring(0, ID_LENGTH + KEY_LENGTH)
+    };
   } catch (e) {
-    console.error("Failed to decode connection code", e);
     return null;
   }
 };

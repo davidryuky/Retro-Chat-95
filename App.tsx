@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { DataConnection } from 'peerjs';
 import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2 } from 'lucide-react';
 import { Win95Window, Win95Button, Win95Input, Win95Panel } from './components/RetroUI';
-import { encryptMessage, decryptMessage, generateRandomKey, generateRandomName, encodeConnectionCode, decodeConnectionCode } from './utils/crypto';
+import { encryptMessage, decryptMessage, generateRandomName, generateSessionCode, parseSessionCode } from './utils/crypto';
 import { Message, AppScreen, NetworkMessage } from './types';
 
 const App: React.FC = () => {
@@ -13,11 +13,11 @@ const App: React.FC = () => {
   
   // Connection Setup
   const [isHost, setIsHost] = useState<boolean>(true);
-  const [myPeerId, setMyPeerId] = useState<string>('');
-  const [targetPeerId, setTargetPeerId] = useState<string>('');
-  const [roomKey, setRoomKey] = useState<string>('');
+  const [sessionCode, setSessionCode] = useState<string>(''); // The 12-char code
   const [joinCodeInput, setJoinCodeInput] = useState<string>(''); // For joining user
-  const [status, setStatus] = useState<string>('Initializing...');
+  const [roomKey, setRoomKey] = useState<string>('');
+  
+  const [status, setStatus] = useState<string>('Offline');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
   // Auto-join handling
@@ -28,7 +28,6 @@ const App: React.FC = () => {
   const [inputText, setInputText] = useState<string>('');
 
   // --- Refs ---
-  // Use 'any' for Peer to handle dynamic import type differences safely
   const peerRef = useRef<any>(null);
   const connRef = useRef<DataConnection | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -45,7 +44,7 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Fullscreen trigger on first interaction
+  // Fullscreen trigger
   useEffect(() => {
     const handleInteraction = () => {
         const docEl = document.documentElement;
@@ -65,75 +64,6 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // Initialize Peer on Load
-  useEffect(() => {
-    const initPeer = async () => {
-        try {
-            // Dynamic import to handle SSR/Client differences if needed, and import format
-            const peerModule = await import('peerjs');
-            // Handle different export formats (Default vs Named)
-            const PeerCtor = peerModule.Peer || (peerModule as any).default || (window as any).Peer;
-            
-            if (!PeerCtor) {
-                throw new Error("PeerJS library could not be loaded.");
-            }
-
-            const peer = new PeerCtor(undefined, {
-                debug: 1 // Reduces verbose logs, adjust to 2 or 3 for debugging
-            });
-
-            peer.on('open', (id: string) => {
-                console.log('My Peer ID is: ' + id);
-                setMyPeerId(id);
-                setStatus('Online');
-                setErrorMsg(null);
-            });
-
-            peer.on('connection', (conn: DataConnection) => {
-                console.log('Incoming connection from:', conn.peer);
-                handleConnection(conn);
-            });
-
-            peer.on('error', (err: any) => {
-                console.error('Peer error:', err);
-                // Don't show "disconnected" error immediately if just network blip
-                if (err.type === 'peer-unavailable') {
-                     setErrorMsg(`Peer not found.`);
-                } else if (err.type === 'network') {
-                     setErrorMsg("Network error. Checking connection...");
-                } else if (err.type === 'unavailable-id') {
-                     setErrorMsg("ID unavailable. Refreshing...");
-                     window.location.reload();
-                } else {
-                     setErrorMsg(`System Error: ${err.type || err.message || 'Unknown'}`);
-                }
-            });
-
-            peer.on('disconnected', () => {
-                setStatus('Disconnected');
-                // Auto-reconnect to server to keep ID alive if possible
-                if (peer && !peer.destroyed) {
-                    peer.reconnect();
-                }
-            });
-
-            peerRef.current = peer;
-        } catch (e: any) {
-            console.error("Failed to init PeerJS", e);
-            setStatus('System Failure');
-            setErrorMsg(`Comm Module Failed: ${e.message}`);
-        }
-    };
-
-    if (!peerRef.current) {
-        initPeer();
-    }
-    
-    return () => {
-        // Cleanup logic if needed
-    };
-  }, []);
-
   // Scroll to bottom of chat
   useEffect(() => {
     if (screen === AppScreen.CHAT) {
@@ -141,148 +71,174 @@ const App: React.FC = () => {
     }
   }, [messages, screen]);
 
-  // Auto-Connect logic after Login
-  useEffect(() => {
-      if (screen === AppScreen.SETUP && pendingJoinCode) {
-          console.log("Processing pending join...");
-          const decoded = decodeConnectionCode(pendingJoinCode);
-          if (decoded) {
-              setTargetPeerId(decoded.peerId);
-              setRoomKey(decoded.key);
-              setIsHost(false); // Force guest mode
-              
-              // Slight delay to ensure Peer is ready and UI updates
-              setTimeout(() => {
-                 connectToPeer(decoded.peerId);
-              }, 500);
-          } else {
-              setErrorMsg("Invalid Invite Link.");
-          }
-          setPendingJoinCode(null); // Clear pending
-      }
-  }, [screen, pendingJoinCode]);
-
   // --- Handlers ---
 
-  const handleConnection = (conn: DataConnection) => {
+  const initHostSession = async () => {
+      // 1. Generate a new code
+      const newCode = generateSessionCode();
+      const parsed = parseSessionCode(newCode);
+      
+      if (!parsed) {
+          setErrorMsg("Error generating secure code.");
+          return;
+      }
+
+      setSessionCode(parsed.rawCode);
+      setRoomKey(parsed.key);
+      setStatus('Initializing Host...');
+      setErrorMsg(null);
+
+      // 2. Initialize Peer with the specific ID from the code
+      await initializePeer(parsed.peerId);
+  };
+
+  const initializePeer = async (customId?: string) => {
+      // Cleanup old peer if exists
+      if (peerRef.current) {
+          peerRef.current.destroy();
+          peerRef.current = null;
+      }
+
+      try {
+            const peerModule = await import('peerjs');
+            const PeerCtor = peerModule.Peer || (peerModule as any).default || (window as any).Peer;
+            
+            if (!PeerCtor) throw new Error("PeerJS library error.");
+
+            // If we are host, we MUST use the custom ID derived from our code
+            // If we are guest, we can let PeerJS assign a random ID
+            const peerOptions: any = { debug: 1 };
+            
+            const peer = customId 
+                ? new PeerCtor(customId, peerOptions) 
+                : new PeerCtor(undefined, peerOptions);
+
+            peer.on('open', (id: string) => {
+                console.log('My Peer ID:', id);
+                setStatus('Online');
+                if (customId) {
+                    // Host is ready
+                    setStatus('Waiting for Peer...');
+                }
+            });
+
+            peer.on('connection', (conn: DataConnection) => {
+                console.log('Incoming connection:', conn.peer);
+                // Only accept one connection for this P2P chat (simplicity)
+                if (connRef.current && connRef.current.open) {
+                    conn.close(); // Busy
+                    return;
+                }
+                setupConnectionListeners(conn);
+            });
+
+            peer.on('error', (err: any) => {
+                console.error('Peer error:', err);
+                if (err.type === 'unavailable-id') {
+                    // Rare collision on generated code
+                    setErrorMsg("Session ID collision. Please retry.");
+                    if (isHost) initHostSession(); // Retry generation
+                } else if (err.type === 'peer-unavailable') {
+                    setErrorMsg("Session not found. Check code.");
+                    setStatus("Error");
+                } else {
+                    setErrorMsg(`Network Error: ${err.type}`);
+                }
+            });
+
+            peer.on('disconnected', () => {
+                if (peer && !peer.destroyed) peer.reconnect();
+            });
+
+            peerRef.current = peer;
+
+      } catch (e: any) {
+          console.error(e);
+          setErrorMsg(`Failed to start network: ${e.message}`);
+      }
+  };
+
+  const joinSession = async () => {
+      const codeToUse = pendingJoinCode || joinCodeInput;
+      if (!codeToUse) return;
+
+      const parsed = parseSessionCode(codeToUse);
+      if (!parsed) {
+          setErrorMsg("Invalid Code Format.");
+          return;
+      }
+
+      setSessionCode(parsed.rawCode);
+      setRoomKey(parsed.key);
+      setErrorMsg(null);
+      setStatus('Connecting...');
+
+      // Initialize my own peer (random ID is fine for guest)
+      if (!peerRef.current) {
+          await initializePeer();
+          // Wait a moment for open
+          await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      if (peerRef.current) {
+          try {
+            const conn = peerRef.current.connect(parsed.peerId, { reliable: true });
+            if (!conn) {
+                setErrorMsg("Connection failed to start.");
+                return;
+            }
+            setupConnectionListeners(conn);
+          } catch(e) {
+              setErrorMsg("Connection Error.");
+          }
+      }
+  };
+
+  const setupConnectionListeners = (conn: DataConnection) => {
       connRef.current = conn;
       
       conn.on('open', () => {
           setStatus('Connected');
           setScreen(AppScreen.CHAT);
           setErrorMsg(null);
-          // Optional: Send handshake or just wait for messages
       });
 
       conn.on('data', async (data: any) => {
           const msg = data as NetworkMessage;
           if (msg.type === 'CHAT' && msg.payload && msg.sender) {
-             // Handle in the effect below to ensure fresh state/refs
+              try {
+                  const text = await decryptMessage(msg.payload, roomKeyRef.current);
+                  addMessage(msg.sender, text);
+              } catch (e) {
+                  addSystemMessage(`Could not decrypt message from ${msg.sender}.`);
+              }
           }
       });
       
       conn.on('close', () => {
           setStatus('Disconnected');
-          addSystemMessage('Connection lost.');
+          addSystemMessage('Peer disconnected.');
           connRef.current = null;
       });
       
       conn.on('error', (err) => {
-          console.error("Connection error", err);
-          addSystemMessage("Connection error occurred.");
+          console.error("Conn error", err);
+          addSystemMessage("Connection error.");
       });
   };
 
-  // Re-bind listener when roomKey changes to ensure we have the correct key in scope
+  // Keep ref updated for callbacks
   const roomKeyRef = useRef(roomKey);
   useEffect(() => { roomKeyRef.current = roomKey; }, [roomKey]);
 
-  useEffect(() => {
-    if(!connRef.current) return;
-    
-    const conn = connRef.current;
-    
-    const dataHandler = async (data: any) => {
-        const msg = data as NetworkMessage;
-        if (msg.type === 'CHAT' && msg.payload && msg.sender) {
-            try {
-                const text = await decryptMessage(msg.payload, roomKeyRef.current);
-                addMessage(msg.sender, text);
-            } catch (e) {
-                console.error("Decryption fail", e);
-                addSystemMessage(`Encrypted message received from ${msg.sender} but could not decrypt. Check Key.`);
-            }
-        }
-    };
-
-    conn.removeAllListeners('data'); 
-    conn.on('data', dataHandler);
-    
-    return () => {
-        conn.removeAllListeners('data');
-    };
-  }, [connRef.current, messages]); // Re-bind if connection exists
-
-
-  const connectToPeer = (overrideTargetId?: string) => {
-      const target = overrideTargetId || targetPeerId;
-      
-      if (!peerRef.current || !target) {
-          setErrorMsg("Invalid Target ID.");
-          return;
-      }
-      setStatus(`Connecting to ${target}...`);
-      setErrorMsg(null);
-      
-      try {
-          const conn = peerRef.current.connect(target, {
-              reliable: true
-          });
-          
-          if (!conn) {
-              setErrorMsg("Could not create connection.");
-              return;
-          }
-          
-          handleConnection(conn);
-          
-          // Timeout handling if connection hangs
-          setTimeout(() => {
-              if (conn.open === false && status.includes('Connecting')) {
-                  setErrorMsg("Connection timed out. Host offline?");
-                  setStatus("Online"); // Reset status
-              }
-          }, 15000);
-          
-      } catch (e) {
-          console.error(e);
-          setErrorMsg("Failed to initiate connection.");
-      }
-  };
-
-  const processJoinCode = () => {
-      if (!joinCodeInput.trim()) return;
-      
-      const decoded = decodeConnectionCode(joinCodeInput);
-      if (decoded) {
-          setTargetPeerId(decoded.peerId);
-          setRoomKey(decoded.key);
-          connectToPeer(decoded.peerId);
-      } else {
-          setErrorMsg("Invalid Code. Check input.");
-      }
-  };
 
   const sendMessage = async () => {
       if (!inputText.trim()) return;
       
       const textToSend = inputText;
       setInputText('');
-
-      // 1. Add to my UI
       addMessage(username, textToSend);
 
-      // 2. Encrypt and Send via P2P
       if (connRef.current && connRef.current.open) {
           try {
               const encrypted = await encryptMessage(textToSend, roomKey);
@@ -293,11 +249,10 @@ const App: React.FC = () => {
               };
               connRef.current.send(netMsg);
           } catch (e) {
-              console.error("Encryption error", e);
-              addSystemMessage("Error: Could not encrypt message.");
+              addSystemMessage("Encryption failed.");
           }
       } else {
-          addSystemMessage("Not connected. Message saved locally.");
+          addSystemMessage("Not connected.");
       }
   };
 
@@ -316,31 +271,53 @@ const App: React.FC = () => {
   };
 
   const handleLogin = () => {
-      if (!username) {
-          setUsername(generateRandomName());
+      if (!username) setUsername(generateRandomName());
+      
+      // If pending join, go straight to join logic
+      if (pendingJoinCode) {
+          setIsHost(false);
+          setScreen(AppScreen.SETUP);
+          // Trigger join slightly after render to ensure state is set
+          setTimeout(joinSession, 100); 
+      } else {
+          setScreen(AppScreen.SETUP);
+          // If default host, init session immediately
+          if (isHost) {
+              initHostSession();
+          }
       }
-      setScreen(AppScreen.SETUP);
-      // Auto-generate a key for Host mode if empty
-      if (!roomKey) setRoomKey(generateRandomKey());
+  };
+
+  // Reset/Switch modes
+  const switchMode = (host: boolean) => {
+      setIsHost(host);
+      if (peerRef.current) {
+          peerRef.current.destroy();
+          peerRef.current = null;
+      }
+      setSessionCode('');
+      setJoinCodeInput('');
+      setStatus('Offline');
+      setErrorMsg(null);
+      
+      if (host) {
+          initHostSession();
+      }
   };
 
   const copyToClipboard = async (text: string) => {
       try {
           await navigator.clipboard.writeText(text);
-          alert("Copied to clipboard!");
-      } catch(e) {
-          console.error("Copy failed", e);
-      }
+          alert("Copied!");
+      } catch(e) {}
   };
 
   const getShareLink = () => {
-      const code = encodeConnectionCode(myPeerId, roomKey);
-      return `${window.location.origin}${window.location.pathname}?join=${code}`;
+      return `${window.location.origin}${window.location.pathname}?join=${sessionCode}`;
   };
 
-  // --- Renderers ---
+  // --- RENDER ---
 
-  // 1. LOGIN SCREEN
   if (screen === AppScreen.LOGIN) {
       return (
           <div className="flex-1 flex flex-col items-center justify-center p-4 bg-[#008080]">
@@ -354,20 +331,12 @@ const App: React.FC = () => {
                        
                        <div>
                            <h1 className="text-2xl font-bold mb-1">WELCOME USER</h1>
-                           <p className="text-sm text-gray-600">Secure Peer-to-Peer Terminal</p>
                            {pendingJoinCode && (
                                <p className="text-xs text-blue-800 mt-2 font-bold animate-pulse">
-                                   >> JOIN REQUEST DETECTED
+                                   >> INVITE RECEIVED
                                </p>
                            )}
                        </div>
-                       
-                       {errorMsg && (
-                           <div className="bg-red-100 border border-red-500 text-red-700 p-2 text-xs flex items-center gap-1">
-                               <AlertTriangle size={14}/>
-                               <span>{errorMsg}</span>
-                           </div>
-                       )}
                        
                        <div className="flex flex-col gap-2 text-left">
                            <label className="font-bold text-sm">CODENAME:</label>
@@ -391,30 +360,24 @@ const App: React.FC = () => {
                        </Win95Button>
                    </div>
                </Win95Window>
-               <div className="mt-8 text-white text-center opacity-70 text-sm animate-pulse">
-                   Tap screen for Full Immersive Mode
-               </div>
           </div>
       );
   }
 
-  // 2. SETUP SCREEN
   if (screen === AppScreen.SETUP) {
-      const connectionCode = encodeConnectionCode(myPeerId, roomKey);
-
       return (
         <div className="flex-1 flex flex-col bg-[#008080] p-2 sm:p-4 overflow-y-auto">
              <Win95Window title="Network Config" className="w-full max-w-lg mx-auto h-full sm:h-auto flex flex-col shadow-[8px_8px_0_rgba(0,0,0,0.5)]">
                 {/* Tabs */}
                 <div className="flex gap-1 p-2 pb-0 bg-[#c0c0c0] shrink-0">
                     <button 
-                        onClick={() => setIsHost(true)} 
+                        onClick={() => switchMode(true)} 
                         className={`flex-1 px-4 py-2 border-t-2 border-l-2 border-r-2 rounded-t-sm ${isHost ? 'bg-[#c0c0c0] border-white text-black font-bold -mb-[2px] z-10' : 'bg-gray-400 border-gray-600 text-gray-700'}`}
                     >
                         HOST
                     </button>
                     <button 
-                        onClick={() => setIsHost(false)}
+                        onClick={() => switchMode(false)}
                         className={`flex-1 px-4 py-2 border-t-2 border-l-2 border-r-2 rounded-t-sm ${!isHost ? 'bg-[#c0c0c0] border-white text-black font-bold -mb-[2px] z-10' : 'bg-gray-400 border-gray-600 text-gray-700'}`}
                     >
                         JOIN
@@ -422,7 +385,6 @@ const App: React.FC = () => {
                 </div>
 
                 <div className="flex-1 p-4 bg-[#c0c0c0] border-2 border-white border-t-white overflow-y-auto">
-                    {/* Error Banner */}
                     {errorMsg && (
                         <div className="bg-red-600 text-white p-2 mb-4 text-center font-bold border-2 border-t-black border-l-black border-b-white border-r-white">
                             ! {errorMsg} !
@@ -431,18 +393,14 @@ const App: React.FC = () => {
 
                     {isHost ? (
                         <div className="space-y-6">
-                            <div className="bg-yellow-100 border border-black p-2 text-sm text-center">
-                                Share the Frequency Code to start.
-                            </div>
-                            
                             <div className="space-y-2">
-                                <label className="font-bold text-sm block">FREQUENCY CODE:</label>
-                                <div className="bg-white border-2 border-t-black border-l-black border-b-white border-r-white p-2 text-xs break-all font-mono select-all">
-                                    {myPeerId ? connectionCode : 'Generating Secure Frequency...'}
+                                <label className="font-bold text-sm block">SESSION CODE:</label>
+                                <div className="bg-white border-2 border-t-black border-l-black border-b-white border-r-white p-4 text-2xl text-center tracking-widest font-mono select-all">
+                                    {sessionCode || '...'}
                                 </div>
                                 
                                 <div className="grid grid-cols-2 gap-2 mt-2">
-                                     <Win95Button onClick={() => copyToClipboard(connectionCode)} className="flex items-center justify-center gap-2">
+                                     <Win95Button onClick={() => copyToClipboard(sessionCode)} className="flex items-center justify-center gap-2">
                                         <Copy size={16}/> Copy Code
                                      </Win95Button>
                                      <Win95Button onClick={() => copyToClipboard(getShareLink())} className="flex items-center justify-center gap-2">
@@ -459,25 +417,25 @@ const App: React.FC = () => {
                             
                             <div className="mt-8 flex flex-col items-center justify-center gap-2 text-gray-600 animate-pulse">
                                 <Wifi size={32}/>
-                                <span className="font-bold">Awaiting Connection...</span>
+                                <span className="font-bold">{status}</span>
                             </div>
                         </div>
                     ) : (
                         <div className="space-y-6">
-                            <p className="text-sm mb-4">Enter the Frequency Code or Link shared by the Host.</p>
+                            <p className="text-sm mb-4">Enter the code from the Host:</p>
                             
                             <div className="space-y-1">
-                                <label className="font-bold text-sm">CONNECTION CODE:</label>
+                                <label className="font-bold text-sm">SESSION CODE:</label>
                                 <Win95Input 
                                     value={joinCodeInput} 
                                     onChange={(e) => setJoinCodeInput(e.target.value)}
-                                    placeholder="Paste code here..."
-                                    className="text-sm"
+                                    placeholder="Ex: aB3d9Z..."
+                                    className="text-center text-xl tracking-widest"
                                 />
                             </div>
 
-                            <Win95Button onClick={processJoinCode} className="w-full mt-6 py-4 text-lg font-bold">
-                                ESTABLISH LINK
+                            <Win95Button onClick={joinSession} className="w-full mt-6 py-4 text-lg font-bold">
+                                {status === 'Connecting...' ? 'CONNECTING...' : 'ESTABLISH LINK'}
                             </Win95Button>
                         </div>
                     )}
@@ -487,48 +445,41 @@ const App: React.FC = () => {
                     <Win95Button onClick={() => setScreen(AppScreen.LOGIN)} className="flex items-center gap-1">
                         <ArrowLeft size={16}/> Back
                     </Win95Button>
-                    <div className="px-2 py-1 border border-gray-500 bg-gray-200 text-xs flex items-center">
-                        {status}
-                    </div>
                 </div>
             </Win95Window>
         </div>
       );
   }
 
-  // 3. CHAT SCREEN (MOBILE APP VIEW)
+  // 3. CHAT SCREEN
   return (
     <div className="fixed inset-0 w-full h-full bg-[#c0c0c0] flex flex-col overflow-hidden">
-        
-        {/* Mobile Header (Fixed Top) */}
         <div className="h-12 bg-[#000080] flex items-center justify-between px-3 shadow-md shrink-0 z-10">
             <div className="flex items-center gap-2 text-white font-bold text-lg truncate">
                 <Terminal size={18} />
-                <span>{isHost ? 'HOST_TERM' : 'GUEST_TERM'}</span>
+                <span>CHAT_{sessionCode.substring(0,6)}</span>
             </div>
             <div className="flex items-center gap-3">
                 {status === 'Connected' ? <Wifi size={18} className="text-green-400"/> : <WifiOff size={18} className="text-red-400"/>}
                 <button 
                     onClick={() => {
                         if(confirm("Terminate session?")) {
-                            window.location.href = window.location.pathname; // Clear params
+                            window.location.href = window.location.pathname;
                         }
                     }}
-                    className="w-8 h-8 bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black flex items-center justify-center active:border-t-black active:border-l-black active:border-b-white active:border-r-white"
+                    className="w-8 h-8 bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black flex items-center justify-center"
                 >
                     <LogOut size={16} className="text-black" />
                 </button>
             </div>
         </div>
         
-        {/* Messages Area (Flexible Scroll) */}
         <div className="flex-1 overflow-y-auto bg-white p-2 w-full">
-            {messages.length === 0 && (
+             {messages.length === 0 && (
                 <div className="h-full flex flex-col items-center justify-center text-gray-300 opacity-60">
                     <ShieldCheck size={64} strokeWidth={1} />
                     <p className="mt-4 text-2xl font-bold tracking-widest">SECURE</p>
-                    <p className="text-sm">END-TO-END ENCRYPTED</p>
-                    <p className="text-xs mt-2">Room: {targetPeerId ? targetPeerId.substring(0,8) + '...' : 'Local'}</p>
+                    <p className="text-xs mt-2">WAITING FOR MESSAGES...</p>
                 </div>
             )}
             
@@ -540,7 +491,7 @@ const App: React.FC = () => {
                     {msg.isSystem ? (
                         <div className="w-full flex justify-center my-2">
                             <span className="bg-yellow-100 text-black px-3 py-1 text-xs border border-black shadow-[2px_2px_0_#000]">
-                                SYSTEM: {msg.content}
+                                {msg.content}
                             </span>
                         </div>
                     ) : (
@@ -571,7 +522,6 @@ const App: React.FC = () => {
             <div ref={messagesEndRef} className="h-2" />
         </div>
 
-        {/* Input Area (Fixed Bottom) */}
         <div className="bg-[#c0c0c0] p-2 border-t-2 border-white shrink-0 z-10 pb-safe">
             <div className="flex gap-2 items-end">
                 <Win95Input 
@@ -588,7 +538,7 @@ const App: React.FC = () => {
             </div>
         </div>
         
-        {/* Windows 95 Taskbar (Visual Only) */}
+        {/* Taskbar */}
         <div className="h-8 bg-[#c0c0c0] border-t-2 border-white flex items-center px-2 shrink-0 select-none pb-safe-bottom">
             <div className="border-2 border-t-white border-l-white border-b-black border-r-black px-2 py-0.5 flex items-center gap-1 active:border-t-black active:border-l-black active:border-b-white active:border-r-white cursor-pointer mr-2">
                 <img src="https://win98icons.alexmeub.com/icons/png/windows_slanted-1.png" className="w-4 h-4" alt="start" />

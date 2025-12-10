@@ -1,3 +1,4 @@
+
 export interface Message {
   id: string;
   sender: string;
@@ -11,6 +12,7 @@ export interface ChatSession {
   encryptionKey: string;
   connected: boolean;
   username: string;
+  sessionCode?: string; // The short code displayed to user
 }
 
 export enum AppScreen {
