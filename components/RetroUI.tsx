@@ -1,3 +1,4 @@
+
 import React, { ReactNode } from 'react';
 import { Minimize2, X, Maximize2 } from 'lucide-react';
 
@@ -10,6 +11,19 @@ interface WindowProps {
 }
 
 export const Win95Window: React.FC<WindowProps> = ({ title, children, className = '', icon, onClose }) => {
+    
+    const handleMinimize = () => {
+         if (document.fullscreenElement) {
+             document.exitFullscreen().catch(err => console.log(err));
+         }
+    };
+
+    const handleMaximize = () => {
+        if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+            document.documentElement.requestFullscreen().catch(err => console.log(err));
+        }
+    };
+
     return (
         <div className={`bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black flex flex-col text-black ${className}`}>
             {/* Title Bar */}
@@ -19,10 +33,10 @@ export const Win95Window: React.FC<WindowProps> = ({ title, children, className 
                     <span>{title}</span>
                 </div>
                 <div className="flex gap-1">
-                    <button className="w-5 h-5 bg-[#c0c0c0] border border-t-white border-l-white border-b-black border-r-black flex items-center justify-center active:border-t-black active:border-l-black active:border-b-white active:border-r-white">
+                    <button onClick={handleMinimize} className="w-5 h-5 bg-[#c0c0c0] border border-t-white border-l-white border-b-black border-r-black flex items-center justify-center active:border-t-black active:border-l-black active:border-b-white active:border-r-white">
                         <Minimize2 size={10} className="text-black" />
                     </button>
-                    <button className="w-5 h-5 bg-[#c0c0c0] border border-t-white border-l-white border-b-black border-r-black flex items-center justify-center active:border-t-black active:border-l-black active:border-b-white active:border-r-white">
+                    <button onClick={handleMaximize} className="w-5 h-5 bg-[#c0c0c0] border border-t-white border-l-white border-b-black border-r-black flex items-center justify-center active:border-t-black active:border-l-black active:border-b-white active:border-r-white">
                         <Maximize2 size={10} className="text-black" />
                     </button>
                     {onClose && (

@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { DataConnection } from 'peerjs';
-import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2 } from 'lucide-react';
+import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2, Maximize2 } from 'lucide-react';
 import { Win95Window, Win95Button, Win95Input, Win95Panel } from './components/RetroUI';
 import { encryptMessage, decryptMessage, generateRandomName, generateSessionCode, parseSessionCode } from './utils/crypto';
 import { Message, AppScreen, NetworkMessage } from './types';
@@ -43,26 +43,6 @@ const App: React.FC = () => {
         setPendingJoinCode(joinCode);
         console.log("Auto-join code detected");
     }
-  }, []);
-
-  // Fullscreen trigger
-  useEffect(() => {
-    const handleInteraction = () => {
-        const docEl = document.documentElement;
-        if (docEl.requestFullscreen && !document.fullscreenElement) {
-            docEl.requestFullscreen().catch((err) => {
-                console.log("Fullscreen request denied:", err);
-            });
-        }
-    };
-    
-    window.addEventListener('click', handleInteraction, { once: true });
-    window.addEventListener('touchstart', handleInteraction, { once: true });
-
-    return () => {
-        window.removeEventListener('click', handleInteraction);
-        window.removeEventListener('touchstart', handleInteraction);
-    };
   }, []);
 
   // Cleanup on unmount
@@ -548,12 +528,23 @@ const App: React.FC = () => {
                 <span>CHAT_{sessionCode.substring(0,6)}</span>
             </div>
             <div className="flex items-center gap-3">
+                <button 
+                    onClick={() => {
+                        if (!document.fullscreenElement) {
+                             document.documentElement.requestFullscreen().catch(() => {});
+                        }
+                    }}
+                    className="w-8 h-8 bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black flex items-center justify-center active:border-t-black active:border-l-black active:border-b-white active:border-r-white"
+                >
+                    <Maximize2 size={16} className="text-black" />
+                </button>
+
                 {status === 'Connected' ? <Wifi size={18} className="text-green-400"/> : <WifiOff size={18} className="text-red-400"/>}
                 <button 
                     onClick={() => {
                        window.location.reload();
                     }}
-                    className="w-8 h-8 bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black flex items-center justify-center"
+                    className="w-8 h-8 bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black flex items-center justify-center active:border-t-black active:border-l-black active:border-b-white active:border-r-white"
                 >
                     <LogOut size={16} className="text-black" />
                 </button>
