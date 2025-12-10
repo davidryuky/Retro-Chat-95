@@ -569,10 +569,14 @@ const App: React.FC = () => {
                 <span>CHAT_{sessionCode.substring(0,6)}</span>
             </div>
             <div className="flex items-center gap-3">
+                {status === 'Connected' ? <Wifi size={18} className="text-green-400"/> : <WifiOff size={18} className="text-red-400"/>}
+                
                 <button 
                     onClick={() => {
                         if (!document.fullscreenElement) {
                              document.documentElement.requestFullscreen().catch(() => {});
+                        } else {
+                             document.exitFullscreen().catch(() => {});
                         }
                     }}
                     className="w-8 h-8 bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black flex items-center justify-center active:border-t-black active:border-l-black active:border-b-white active:border-r-white"
@@ -580,7 +584,6 @@ const App: React.FC = () => {
                     <Maximize2 size={16} className="text-black" />
                 </button>
 
-                {status === 'Connected' ? <Wifi size={18} className="text-green-400"/> : <WifiOff size={18} className="text-red-400"/>}
                 <button 
                     onClick={() => {
                        window.location.reload();
