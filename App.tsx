@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { DataConnection } from 'peerjs';
-import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff } from 'lucide-react';
+import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle } from 'lucide-react';
 import { Win95Window, Win95Button, Win95Input, Win95Panel } from './components/RetroUI';
 import { encryptMessage, decryptMessage, generateRandomKey, generateRandomName } from './utils/crypto';
 import { Message, AppScreen, NetworkMessage } from './types';
@@ -63,7 +63,9 @@ const App: React.FC = () => {
                 throw new Error("PeerJS library could not be loaded.");
             }
 
-            const peer = new PeerCtor();
+            const peer = new PeerCtor(undefined, {
+                debug: 1 // Reduces verbose logs, adjust to 2 or 3 for debugging
+            });
 
             peer.on('open', (id: string) => {
                 console.log('My Peer ID is: ' + id);
@@ -84,8 +86,11 @@ const App: React.FC = () => {
                      setErrorMsg(`Peer ${targetPeerId} not found.`);
                 } else if (err.type === 'network') {
                      setErrorMsg("Network error. Checking connection...");
+                } else if (err.type === 'unavailable-id') {
+                     setErrorMsg("ID unavailable. Refreshing...");
+                     window.location.reload();
                 } else {
-                     setErrorMsg(`System Error: ${err.type || 'Unknown'}`);
+                     setErrorMsg(`System Error: ${err.type || err.message || 'Unknown'}`);
                 }
             });
 
@@ -98,10 +103,10 @@ const App: React.FC = () => {
             });
 
             peerRef.current = peer;
-        } catch (e) {
+        } catch (e: any) {
             console.error("Failed to init PeerJS", e);
             setStatus('System Failure');
-            setErrorMsg("Could not load communication module.");
+            setErrorMsg(`Comm Module Failed: ${e.message}`);
         }
     };
 
@@ -291,6 +296,13 @@ const App: React.FC = () => {
                            <h1 className="text-2xl font-bold mb-1">WELCOME USER</h1>
                            <p className="text-sm text-gray-600">Secure Peer-to-Peer Terminal</p>
                        </div>
+                       
+                       {errorMsg && (
+                           <div className="bg-red-100 border border-red-500 text-red-700 p-2 text-xs flex items-center gap-1">
+                               <AlertTriangle size={14}/>
+                               <span>{errorMsg}</span>
+                           </div>
+                       )}
                        
                        <div className="flex flex-col gap-2 text-left">
                            <label className="font-bold text-sm">CODENAME:</label>
