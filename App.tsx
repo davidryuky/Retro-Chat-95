@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { DataConnection } from 'peerjs';
-import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2, Maximize2 } from 'lucide-react';
+import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2, Maximize2, Activity } from 'lucide-react';
 import { Win95Window, Win95Button, Win95Input, Win95Panel } from './components/RetroUI';
 import { encryptMessage, decryptMessage, generateRandomName, generateSessionCode, parseSessionCode } from './utils/crypto';
 import { Message, AppScreen, NetworkMessage } from './types';
@@ -26,12 +26,21 @@ const App: React.FC = () => {
   // Chat
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState<string>('');
+  const [isRemoteTyping, setIsRemoteTyping] = useState<boolean>(false);
 
   // --- Refs ---
   const peerRef = useRef<any>(null);
   const connRef = useRef<DataConnection | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  
+  // Reconnect Refs
   const reconnectTimeoutRef = useRef<any>(null);
+  const reconnectAttemptsRef = useRef<number>(0);
+  const MAX_RECONNECT_ATTEMPTS = 5;
+
+  // Typing Refs
+  const typingSendTimeoutRef = useRef<any>(null);
+  const typingReceiveTimeoutRef = useRef<any>(null);
 
   // --- Effects ---
 
@@ -59,7 +68,7 @@ const App: React.FC = () => {
     if (screen === AppScreen.CHAT) {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, screen]);
+  }, [messages, screen, isRemoteTyping]);
 
   // Request Notification Permission when entering chat
   useEffect(() => {
@@ -91,12 +100,60 @@ const App: React.FC = () => {
       await initializePeer(parsed.peerId);
   };
 
+  const handlePeerError = (err: any) => {
+    console.error('Peer error:', err);
+    const type = err.type;
+
+    if (type === 'unavailable-id') {
+        if (isHost) {
+            setErrorMsg("ID collision. Retrying...");
+            setTimeout(initHostSession, 1000);
+        } else {
+            setErrorMsg("ID unavailable. Please retry.");
+        }
+    } else if (type === 'peer-unavailable') {
+        setErrorMsg("Session not found. Check code.");
+        setStatus("Error");
+    } else if (type === 'network' || type === 'server-error' || err.message === 'Lost connection to server') {
+        attemptReconnect();
+    } else {
+        if (status !== 'Reconnecting...') {
+            setErrorMsg(`Net Error: ${type || 'Unknown'}`);
+        }
+    }
+  };
+
+  const attemptReconnect = () => {
+    if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+        reconnectAttemptsRef.current++;
+        setStatus(`Reconnecting (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
+        console.log(`Attempting reconnect ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS}`);
+        
+        if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+        
+        reconnectTimeoutRef.current = setTimeout(() => {
+            if (peerRef.current && !peerRef.current.destroyed) {
+                peerRef.current.reconnect();
+            } else {
+                // If peer is destroyed, we might need to fully re-init, 
+                // but usually reconnect() is for the signaling server connection.
+                // If destroyed, the user session is likely dead.
+                setErrorMsg("Connection fatal. Please restart.");
+            }
+        }, 5000); // 5 seconds delay
+    } else {
+        setStatus("Connection Lost");
+        setErrorMsg("Failed to reconnect after 5 attempts.");
+    }
+  };
+
   const initializePeer = async (customId?: string) => {
       // Cleanup old peer if exists
       if (peerRef.current) {
           peerRef.current.destroy();
           peerRef.current = null;
       }
+      reconnectAttemptsRef.current = 0; // Reset attempts on new init
 
       try {
             const peerModule = await import('peerjs');
@@ -104,7 +161,6 @@ const App: React.FC = () => {
             
             if (!PeerCtor) throw new Error("PeerJS library error.");
 
-            // Standard STUN servers to prevent connection drops
             const peerOptions: any = { 
                 debug: 1,
                 config: {
@@ -115,7 +171,6 @@ const App: React.FC = () => {
                 }
             };
             
-            // If we are host, we MUST use the custom ID derived from our code
             const peer = customId 
                 ? new PeerCtor(customId, peerOptions) 
                 : new PeerCtor(undefined, peerOptions);
@@ -123,7 +178,9 @@ const App: React.FC = () => {
             peer.on('open', (id: string) => {
                 console.log('My Peer ID:', id);
                 setStatus('Online');
-                setErrorMsg(null); // Clear errors on success
+                setErrorMsg(null); 
+                reconnectAttemptsRef.current = 0; // Reset on successful open
+                
                 if (customId) {
                     setStatus('Waiting for Peer...');
                 }
@@ -131,58 +188,18 @@ const App: React.FC = () => {
 
             peer.on('connection', (conn: DataConnection) => {
                 console.log('Incoming connection:', conn.peer);
-                // Only accept one connection for this P2P chat (simplicity)
                 if (connRef.current && connRef.current.open) {
-                    conn.close(); // Busy
+                    conn.close();
                     return;
                 }
                 setupConnectionListeners(conn);
             });
 
-            peer.on('error', (err: any) => {
-                console.error('Peer error:', err);
-                const type = err.type;
-
-                if (type === 'unavailable-id') {
-                    // ID collision. If host, try next code.
-                    if (isHost) {
-                        setErrorMsg("ID collision. Retrying...");
-                        setTimeout(initHostSession, 1000);
-                    } else {
-                        setErrorMsg("ID unavailable. Please retry.");
-                    }
-                } else if (type === 'peer-unavailable') {
-                    setErrorMsg("Session not found. Check code.");
-                    setStatus("Error");
-                } else if (type === 'network' || type === 'server-error' || err.message === 'Lost connection to server') {
-                    // Critical: Signaling server lost. Try to reconnect if not destroyed.
-                    if (peer && !peer.destroyed) {
-                        console.log("Connection lost, attempting reconnect...");
-                        setStatus("Reconnecting...");
-                        // Debounce reconnect
-                        if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-                        reconnectTimeoutRef.current = setTimeout(() => {
-                            peer.reconnect();
-                        }, 2000);
-                    }
-                } else {
-                    // Don't show generic errors if we are just reconnecting
-                    if (status !== 'Reconnecting...') {
-                        setErrorMsg(`Net Error: ${type || 'Unknown'}`);
-                    }
-                }
-            });
+            peer.on('error', handlePeerError);
 
             peer.on('disconnected', () => {
                 console.log("Peer disconnected from server.");
-                // If we have an active chat, this is fine, we just can't make NEW connections.
-                // But we should try to reconnect to signaling server to be safe.
-                if (peer && !peer.destroyed) {
-                    if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-                    reconnectTimeoutRef.current = setTimeout(() => {
-                         peer.reconnect();
-                    }, 2000);
-                }
+                attemptReconnect();
             });
 
             peerRef.current = peer;
@@ -208,10 +225,8 @@ const App: React.FC = () => {
       setErrorMsg(null);
       setStatus('Connecting...');
 
-      // Initialize my own peer (random ID is fine for guest)
       if (!peerRef.current || peerRef.current.destroyed) {
           await initializePeer();
-          // Wait a moment for open
           await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
@@ -230,7 +245,7 @@ const App: React.FC = () => {
   };
 
   const sendNotification = async (sender: string, text: string) => {
-      if (document.visibilityState === 'visible') return; // Don't notify if app is open
+      if (document.visibilityState === 'visible') return; 
       if (!('Notification' in window)) return;
       if (Notification.permission !== 'granted') return;
 
@@ -238,7 +253,6 @@ const App: React.FC = () => {
       const body = text.length > 50 ? text.substring(0, 50) + '...' : text;
       
       try {
-          // Try to use Service Worker registration for better mobile support
           if (navigator.serviceWorker && navigator.serviceWorker.ready) {
               const reg = await navigator.serviceWorker.ready;
               reg.showNotification(title, {
@@ -248,7 +262,6 @@ const App: React.FC = () => {
                   vibrate: [200, 100, 200]
               } as any);
           } else {
-              // Fallback to standard API
               new Notification(title, {
                   body: body,
                   icon: 'https://win98icons.alexmeub.com/icons/png/computer_explorer-5.png'
@@ -266,15 +279,29 @@ const App: React.FC = () => {
           setStatus('Connected');
           setScreen(AppScreen.CHAT);
           setErrorMsg(null);
+          reconnectAttemptsRef.current = 0; // Reset on successful peer connection
       });
 
       conn.on('data', async (data: any) => {
           const msg = data as NetworkMessage;
+          
+          if (msg.type === 'TYPING') {
+              setIsRemoteTyping(true);
+              // Clear existing timeout
+              if (typingReceiveTimeoutRef.current) clearTimeout(typingReceiveTimeoutRef.current);
+              // Set new timeout to hide typing indicator after 3 seconds
+              typingReceiveTimeoutRef.current = setTimeout(() => {
+                  setIsRemoteTyping(false);
+              }, 3000);
+              return;
+          }
+
           if (msg.type === 'CHAT' && msg.payload && msg.sender) {
               try {
+                  // If we receive a message, they stopped typing (conceptually)
+                  setIsRemoteTyping(false); 
                   const text = await decryptMessage(msg.payload, roomKeyRef.current);
                   addMessage(msg.sender, text);
-                  // Trigger notification if app is in background
                   sendNotification(msg.sender, text);
               } catch (e) {
                   addSystemMessage(`Could not decrypt message from ${msg.sender}.`);
@@ -286,6 +313,7 @@ const App: React.FC = () => {
           setStatus('Disconnected');
           addSystemMessage('Peer disconnected.');
           connRef.current = null;
+          setIsRemoteTyping(false);
       });
       
       conn.on('error', (err) => {
@@ -298,6 +326,24 @@ const App: React.FC = () => {
   const roomKeyRef = useRef(roomKey);
   useEffect(() => { roomKeyRef.current = roomKey; }, [roomKey]);
 
+  // Handle typing indicator transmission
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const val = e.target.value;
+      setInputText(val);
+
+      // Send typing signal throttled (max once every 1 second)
+      if (val.length > 0 && connRef.current && connRef.current.open) {
+          if (!typingSendTimeoutRef.current) {
+              const typingMsg: NetworkMessage = { type: 'TYPING' };
+              connRef.current.send(typingMsg);
+              
+              // Prevent sending another typing signal for 1 second
+              typingSendTimeoutRef.current = setTimeout(() => {
+                  typingSendTimeoutRef.current = null;
+              }, 1000);
+          }
+      }
+  };
 
   const sendMessage = async () => {
       if (!inputText.trim()) return;
@@ -344,18 +390,15 @@ const App: React.FC = () => {
       if (pendingJoinCode) {
           setIsHost(false);
           setScreen(AppScreen.SETUP);
-          // Trigger join slightly after render to ensure state is set
           setTimeout(joinSession, 100); 
       } else {
           setScreen(AppScreen.SETUP);
-          // If default host, init session immediately
           if (isHost) {
               initHostSession();
           }
       }
   };
 
-  // Reset/Switch modes
   const switchMode = (host: boolean) => {
       setIsHost(host);
       if (peerRef.current) {
@@ -368,7 +411,6 @@ const App: React.FC = () => {
       setErrorMsg(null);
       
       if (host) {
-          // Small timeout to allow destroy to complete
           setTimeout(initHostSession, 100);
       }
   };
@@ -436,7 +478,6 @@ const App: React.FC = () => {
       return (
         <div className="flex-1 flex flex-col bg-[#008080] p-2 sm:p-4 overflow-y-auto">
              <Win95Window title="Network Config" className="w-full max-w-lg mx-auto h-full sm:h-auto flex flex-col shadow-[8px_8px_0_rgba(0,0,0,0.5)]">
-                {/* Tabs */}
                 <div className="flex gap-1 p-2 pb-0 bg-[#c0c0c0] shrink-0">
                     <button 
                         onClick={() => switchMode(true)} 
@@ -596,14 +637,25 @@ const App: React.FC = () => {
                     )}
                 </div>
             ))}
+            {/* Visual spacer for typing indicator so it doesn't overlap last message when scrolled */}
+            {isRemoteTyping && <div className="h-6"></div>}
+            
             <div ref={messagesEndRef} className="h-2" />
         </div>
+
+        {/* Typing Indicator Status Bar */}
+        {isRemoteTyping && (
+             <div className="bg-[#c0c0c0] px-2 py-1 text-xs font-bold text-blue-800 border-t-2 border-white animate-pulse flex items-center gap-2">
+                 <Activity size={12} />
+                 &gt; REMOTE USER IS TYPING...
+             </div>
+        )}
 
         <div className="bg-[#c0c0c0] p-2 border-t-2 border-white shrink-0 z-10 pb-safe">
             <div className="flex gap-2 items-end">
                 <Win95Input 
                     value={inputText}
-                    onChange={(e) => setInputText(e.target.value)}
+                    onChange={handleInputChange}
                     onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
                     placeholder="Message..."
                     className="flex-1 min-h-[50px] text-xl !text-black border-2 border-t-black border-l-black border-b-white border-r-white" 

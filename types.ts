@@ -27,7 +27,7 @@ export interface EncryptedPayload {
 }
 
 export interface NetworkMessage {
-  type: 'CHAT' | 'SYSTEM' | 'JOIN' | 'LEAVE';
+  type: 'CHAT' | 'SYSTEM' | 'JOIN' | 'LEAVE' | 'TYPING';
   payload?: EncryptedPayload;
   sender?: string; // Plaintext sender name (metadata is usually public in simple P2P, only content is encrypted)
 }
