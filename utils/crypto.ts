@@ -1,3 +1,4 @@
+
 // Utility to convert string to ArrayBuffer
 const str2ab = (str: string): ArrayBuffer => {
   const buf = new ArrayBuffer(str.length);
@@ -113,4 +114,45 @@ export const generateRandomName = (): string => {
   const noun = nouns[Math.floor(Math.random() * nouns.length)];
   const num = Math.floor(Math.random() * 99);
   return `${adj}${noun}${num}`;
+};
+
+// --- Connection Code Helpers ---
+
+const SEPARATOR = '$';
+
+export const encodeConnectionCode = (peerId: string, key: string): string => {
+  try {
+    const raw = `${peerId}${SEPARATOR}${key}`;
+    return btoa(raw); // Base64 encode
+  } catch (e) {
+    console.error("Failed to encode connection code", e);
+    return "";
+  }
+};
+
+export const decodeConnectionCode = (code: string): { peerId: string, key: string } | null => {
+  try {
+    // If user pasted a full URL, try to extract the 'join' param
+    let cleanCode = code;
+    if (code.includes('?join=')) {
+        const urlParams = new URLSearchParams(code.split('?')[1]);
+        cleanCode = urlParams.get('join') || code;
+    } else if (code.includes('http')) {
+        // Fallback for simple paste
+        try {
+            const url = new URL(code);
+            cleanCode = url.searchParams.get('join') || code;
+        } catch {}
+    }
+
+    const raw = atob(cleanCode);
+    const parts = raw.split(SEPARATOR);
+    if (parts.length === 2) {
+      return { peerId: parts[0], key: parts[1] };
+    }
+    return null;
+  } catch (e) {
+    console.error("Failed to decode connection code", e);
+    return null;
+  }
 };

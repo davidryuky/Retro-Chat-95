@@ -1,8 +1,9 @@
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { DataConnection } from 'peerjs';
-import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle } from 'lucide-react';
+import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2 } from 'lucide-react';
 import { Win95Window, Win95Button, Win95Input, Win95Panel } from './components/RetroUI';
-import { encryptMessage, decryptMessage, generateRandomKey, generateRandomName } from './utils/crypto';
+import { encryptMessage, decryptMessage, generateRandomKey, generateRandomName, encodeConnectionCode, decodeConnectionCode } from './utils/crypto';
 import { Message, AppScreen, NetworkMessage } from './types';
 
 const App: React.FC = () => {
@@ -15,8 +16,12 @@ const App: React.FC = () => {
   const [myPeerId, setMyPeerId] = useState<string>('');
   const [targetPeerId, setTargetPeerId] = useState<string>('');
   const [roomKey, setRoomKey] = useState<string>('');
+  const [joinCodeInput, setJoinCodeInput] = useState<string>(''); // For joining user
   const [status, setStatus] = useState<string>('Initializing...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  
+  // Auto-join handling
+  const [pendingJoinCode, setPendingJoinCode] = useState<string | null>(null);
 
   // Chat
   const [messages, setMessages] = useState<Message[]>([]);
@@ -29,6 +34,16 @@ const App: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // --- Effects ---
+
+  // Check for URL parameters on load
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const joinCode = params.get('join');
+    if (joinCode) {
+        setPendingJoinCode(joinCode);
+        console.log("Auto-join code detected");
+    }
+  }, []);
 
   // Fullscreen trigger on first interaction
   useEffect(() => {
@@ -83,7 +98,7 @@ const App: React.FC = () => {
                 console.error('Peer error:', err);
                 // Don't show "disconnected" error immediately if just network blip
                 if (err.type === 'peer-unavailable') {
-                     setErrorMsg(`Peer ${targetPeerId} not found.`);
+                     setErrorMsg(`Peer not found.`);
                 } else if (err.type === 'network') {
                      setErrorMsg("Network error. Checking connection...");
                 } else if (err.type === 'unavailable-id') {
@@ -125,6 +140,27 @@ const App: React.FC = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages, screen]);
+
+  // Auto-Connect logic after Login
+  useEffect(() => {
+      if (screen === AppScreen.SETUP && pendingJoinCode) {
+          console.log("Processing pending join...");
+          const decoded = decodeConnectionCode(pendingJoinCode);
+          if (decoded) {
+              setTargetPeerId(decoded.peerId);
+              setRoomKey(decoded.key);
+              setIsHost(false); // Force guest mode
+              
+              // Slight delay to ensure Peer is ready and UI updates
+              setTimeout(() => {
+                 connectToPeer(decoded.peerId);
+              }, 500);
+          } else {
+              setErrorMsg("Invalid Invite Link.");
+          }
+          setPendingJoinCode(null); // Clear pending
+      }
+  }, [screen, pendingJoinCode]);
 
   // --- Handlers ---
 
@@ -188,16 +224,18 @@ const App: React.FC = () => {
   }, [connRef.current, messages]); // Re-bind if connection exists
 
 
-  const connectToPeer = () => {
-      if (!peerRef.current || !targetPeerId) {
-          setErrorMsg("Please enter a Room ID.");
+  const connectToPeer = (overrideTargetId?: string) => {
+      const target = overrideTargetId || targetPeerId;
+      
+      if (!peerRef.current || !target) {
+          setErrorMsg("Invalid Target ID.");
           return;
       }
-      setStatus(`Connecting to ${targetPeerId}...`);
+      setStatus(`Connecting to ${target}...`);
       setErrorMsg(null);
       
       try {
-          const conn = peerRef.current.connect(targetPeerId, {
+          const conn = peerRef.current.connect(target, {
               reliable: true
           });
           
@@ -211,14 +249,27 @@ const App: React.FC = () => {
           // Timeout handling if connection hangs
           setTimeout(() => {
               if (conn.open === false && status.includes('Connecting')) {
-                  setErrorMsg("Connection timed out. Is the host online?");
+                  setErrorMsg("Connection timed out. Host offline?");
                   setStatus("Online"); // Reset status
               }
-          }, 10000);
+          }, 15000);
           
       } catch (e) {
           console.error(e);
           setErrorMsg("Failed to initiate connection.");
+      }
+  };
+
+  const processJoinCode = () => {
+      if (!joinCodeInput.trim()) return;
+      
+      const decoded = decodeConnectionCode(joinCodeInput);
+      if (decoded) {
+          setTargetPeerId(decoded.peerId);
+          setRoomKey(decoded.key);
+          connectToPeer(decoded.peerId);
+      } else {
+          setErrorMsg("Invalid Code. Check input.");
       }
   };
 
@@ -273,9 +324,18 @@ const App: React.FC = () => {
       if (!roomKey) setRoomKey(generateRandomKey());
   };
 
-  const copyToClipboard = (text: string) => {
-      navigator.clipboard.writeText(text);
-      // Visual feedback could be added here
+  const copyToClipboard = async (text: string) => {
+      try {
+          await navigator.clipboard.writeText(text);
+          alert("Copied to clipboard!");
+      } catch(e) {
+          console.error("Copy failed", e);
+      }
+  };
+
+  const getShareLink = () => {
+      const code = encodeConnectionCode(myPeerId, roomKey);
+      return `${window.location.origin}${window.location.pathname}?join=${code}`;
   };
 
   // --- Renderers ---
@@ -295,6 +355,11 @@ const App: React.FC = () => {
                        <div>
                            <h1 className="text-2xl font-bold mb-1">WELCOME USER</h1>
                            <p className="text-sm text-gray-600">Secure Peer-to-Peer Terminal</p>
+                           {pendingJoinCode && (
+                               <p className="text-xs text-blue-800 mt-2 font-bold animate-pulse">
+                                   >> JOIN REQUEST DETECTED
+                               </p>
+                           )}
                        </div>
                        
                        {errorMsg && (
@@ -322,7 +387,7 @@ const App: React.FC = () => {
                            onClick={handleLogin} 
                            className="py-3 text-xl mt-2 font-bold border-2"
                        >
-                           INITIALIZE
+                           {pendingJoinCode ? 'JOIN CHANNEL' : 'INITIALIZE'}
                        </Win95Button>
                    </div>
                </Win95Window>
@@ -335,6 +400,8 @@ const App: React.FC = () => {
 
   // 2. SETUP SCREEN
   if (screen === AppScreen.SETUP) {
+      const connectionCode = encodeConnectionCode(myPeerId, roomKey);
+
       return (
         <div className="flex-1 flex flex-col bg-[#008080] p-2 sm:p-4 overflow-y-auto">
              <Win95Window title="Network Config" className="w-full max-w-lg mx-auto h-full sm:h-auto flex flex-col shadow-[8px_8px_0_rgba(0,0,0,0.5)]">
@@ -365,57 +432,52 @@ const App: React.FC = () => {
                     {isHost ? (
                         <div className="space-y-6">
                             <div className="bg-yellow-100 border border-black p-2 text-sm text-center">
-                                Share these credentials securely.
+                                Share the Frequency Code to start.
                             </div>
                             
-                            <div className="space-y-1">
-                                <label className="font-bold text-sm block">MY ID (ROOM):</label>
-                                <div className="flex gap-2">
-                                    <Win95Input readOnly value={myPeerId || 'Generating...'} className="bg-gray-200" />
-                                    <Win95Button onClick={() => copyToClipboard(myPeerId)} title="Copy"><Copy size={18}/></Win95Button>
+                            <div className="space-y-2">
+                                <label className="font-bold text-sm block">FREQUENCY CODE:</label>
+                                <div className="bg-white border-2 border-t-black border-l-black border-b-white border-r-white p-2 text-xs break-all font-mono select-all">
+                                    {myPeerId ? connectionCode : 'Generating Secure Frequency...'}
                                 </div>
-                            </div>
-
-                            <div className="space-y-1">
-                                <label className="font-bold text-sm block">SECRET KEY:</label>
-                                <div className="flex gap-2">
-                                    <Win95Input readOnly value={roomKey} className="bg-gray-200" />
-                                    <Win95Button onClick={() => copyToClipboard(roomKey)} title="Copy"><Copy size={18}/></Win95Button>
+                                
+                                <div className="grid grid-cols-2 gap-2 mt-2">
+                                     <Win95Button onClick={() => copyToClipboard(connectionCode)} className="flex items-center justify-center gap-2">
+                                        <Copy size={16}/> Copy Code
+                                     </Win95Button>
+                                     <Win95Button onClick={() => copyToClipboard(getShareLink())} className="flex items-center justify-center gap-2">
+                                        <LinkIcon size={16}/> Copy Link
+                                     </Win95Button>
+                                     
+                                     {navigator.share && (
+                                         <Win95Button onClick={() => navigator.share({title: 'RetroChat', url: getShareLink()})} className="col-span-2 flex items-center justify-center gap-2">
+                                            <Share2 size={16}/> Share Invite
+                                         </Win95Button>
+                                     )}
                                 </div>
-                                <button onClick={() => setRoomKey(generateRandomKey())} className="text-blue-800 underline text-xs w-full text-right mt-1">
-                                    Generate New Key
-                                </button>
                             </div>
                             
-                            <div className="mt-8 flex items-center justify-center gap-2 text-gray-600 animate-pulse">
-                                <Wifi size={20}/>
-                                <span>Waiting for incoming connection...</span>
+                            <div className="mt-8 flex flex-col items-center justify-center gap-2 text-gray-600 animate-pulse">
+                                <Wifi size={32}/>
+                                <span className="font-bold">Awaiting Connection...</span>
                             </div>
                         </div>
                     ) : (
                         <div className="space-y-6">
-                            <p className="text-sm mb-4">Enter the Host's Room ID and the shared Secret Key.</p>
+                            <p className="text-sm mb-4">Enter the Frequency Code or Link shared by the Host.</p>
                             
                             <div className="space-y-1">
-                                <label className="font-bold text-sm">TARGET ID:</label>
+                                <label className="font-bold text-sm">CONNECTION CODE:</label>
                                 <Win95Input 
-                                    value={targetPeerId} 
-                                    onChange={(e) => setTargetPeerId(e.target.value)}
-                                    placeholder="Paste Host ID here"
+                                    value={joinCodeInput} 
+                                    onChange={(e) => setJoinCodeInput(e.target.value)}
+                                    placeholder="Paste code here..."
+                                    className="text-sm"
                                 />
                             </div>
 
-                            <div className="space-y-1">
-                                <label className="font-bold text-sm">SECRET KEY:</label>
-                                <Win95Input 
-                                    value={roomKey} 
-                                    onChange={(e) => setRoomKey(e.target.value)}
-                                    placeholder="Paste Secret Key here"
-                                />
-                            </div>
-
-                            <Win95Button onClick={connectToPeer} className="w-full mt-6 py-4 text-lg font-bold">
-                                CONNECT SYSTEM
+                            <Win95Button onClick={processJoinCode} className="w-full mt-6 py-4 text-lg font-bold">
+                                ESTABLISH LINK
                             </Win95Button>
                         </div>
                     )}
@@ -449,7 +511,7 @@ const App: React.FC = () => {
                 <button 
                     onClick={() => {
                         if(confirm("Terminate session?")) {
-                            window.location.reload();
+                            window.location.href = window.location.pathname; // Clear params
                         }
                     }}
                     className="w-8 h-8 bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black flex items-center justify-center active:border-t-black active:border-l-black active:border-b-white active:border-r-white"
@@ -466,6 +528,7 @@ const App: React.FC = () => {
                     <ShieldCheck size={64} strokeWidth={1} />
                     <p className="mt-4 text-2xl font-bold tracking-widest">SECURE</p>
                     <p className="text-sm">END-TO-END ENCRYPTED</p>
+                    <p className="text-xs mt-2">Room: {targetPeerId ? targetPeerId.substring(0,8) + '...' : 'Local'}</p>
                 </div>
             )}
             
@@ -533,7 +596,7 @@ const App: React.FC = () => {
             </div>
             <div className="w-[2px] h-5 bg-gray-400 shadow-[1px_0_white] mr-2"></div>
             <div className="flex-1 bg-black/10 border border-b-white border-r-white border-t-black border-l-black px-2 py-0.5 truncate text-xs text-white bg-[#000080]">
-                 {targetPeerId ? `Connected: ${targetPeerId.substring(0,8)}...` : 'RetroChat 95'}
+                 RetroChat
             </div>
             <div className="w-[2px] h-5 bg-gray-400 shadow-[1px_0_white] mx-2"></div>
             <div className="border-2 border-t-gray-600 border-l-gray-600 border-b-white border-r-white px-2 bg-[#c0c0c0] text-xs">
