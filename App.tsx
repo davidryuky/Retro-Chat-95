@@ -380,7 +380,7 @@ const App: React.FC = () => {
                            <h1 className="text-2xl font-bold mb-1">WELCOME USER</h1>
                            {pendingJoinCode && (
                                <p className="text-xs text-blue-800 mt-2 font-bold animate-pulse">
-                                   >> INVITE RECEIVED
+                                   &gt;&gt; INVITE RECEIVED
                                </p>
                            )}
                        </div>
