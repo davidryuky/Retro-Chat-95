@@ -81,6 +81,15 @@ const App: React.FC = () => {
     }
   }, [messages, screen]);
 
+  // Request Notification Permission when entering chat
+  useEffect(() => {
+    if (screen === AppScreen.CHAT && 'Notification' in window) {
+        if (Notification.permission === 'default') {
+            Notification.requestPermission();
+        }
+    }
+  }, [screen]);
+
   // --- Handlers ---
 
   const initHostSession = async () => {
@@ -240,6 +249,36 @@ const App: React.FC = () => {
       }
   };
 
+  const sendNotification = async (sender: string, text: string) => {
+      if (document.visibilityState === 'visible') return; // Don't notify if app is open
+      if (!('Notification' in window)) return;
+      if (Notification.permission !== 'granted') return;
+
+      const title = `New Message from ${sender}`;
+      const body = text.length > 50 ? text.substring(0, 50) + '...' : text;
+      
+      try {
+          // Try to use Service Worker registration for better mobile support
+          if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+              const reg = await navigator.serviceWorker.ready;
+              reg.showNotification(title, {
+                  body: body,
+                  icon: 'https://win98icons.alexmeub.com/icons/png/computer_explorer-5.png',
+                  tag: 'retro-chat-msg',
+                  vibrate: [200, 100, 200]
+              } as any);
+          } else {
+              // Fallback to standard API
+              new Notification(title, {
+                  body: body,
+                  icon: 'https://win98icons.alexmeub.com/icons/png/computer_explorer-5.png'
+              });
+          }
+      } catch (e) {
+          console.error("Notification failed", e);
+      }
+  };
+
   const setupConnectionListeners = (conn: DataConnection) => {
       connRef.current = conn;
       
@@ -255,6 +294,8 @@ const App: React.FC = () => {
               try {
                   const text = await decryptMessage(msg.payload, roomKeyRef.current);
                   addMessage(msg.sender, text);
+                  // Trigger notification if app is in background
+                  sendNotification(msg.sender, text);
               } catch (e) {
                   addSystemMessage(`Could not decrypt message from ${msg.sender}.`);
               }

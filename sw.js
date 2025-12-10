@@ -1,3 +1,4 @@
+
 const CACHE_NAME = 'retrochat-v1';
 const ASSETS_TO_CACHE = [
   '/',
@@ -39,5 +40,27 @@ self.addEventListener('fetch', (event) => {
       .catch(() => {
         return caches.match(event.request);
       })
+  );
+});
+
+// Notification click event - brings app to focus
+self.addEventListener('notificationclick', function(event) {
+  event.notification.close();
+
+  // Focus the window if it's already open
+  event.waitUntil(
+    clients.matchAll({type: 'window', includeUncontrolled: true}).then(windowClients => {
+      // Check if there is already a window/tab open with the target URL
+      for (var i = 0; i < windowClients.length; i++) {
+        var client = windowClients[i];
+        if (client.url === '/' && 'focus' in client) {
+          return client.focus();
+        }
+      }
+      // If not, open a new window/tab
+      if (clients.openWindow) {
+        return clients.openWindow('/');
+      }
+    })
   );
 });
