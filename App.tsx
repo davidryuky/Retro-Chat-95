@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { DataConnection } from 'peerjs';
-import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2, Maximize2, Activity } from 'lucide-react';
+import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2, Maximize2, Activity, Lock } from 'lucide-react';
 import { Win95Window, Win95Button, Win95Input, Win95Panel } from './components/RetroUI';
 import { encryptMessage, decryptMessage, generateRandomName, generateSessionCode, parseSessionCode } from './utils/crypto';
 import { Message, AppScreen, NetworkMessage } from './types';
@@ -632,9 +632,12 @@ const App: React.FC = () => {
                             >
                                 {msg.content}
                             </div>
-                            <span className="text-[10px] text-gray-400 mt-1 px-1">
-                                {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                            </span>
+                            <div className="flex items-center gap-1 mt-1 px-1 opacity-60 select-none">
+                                <span className="text-[10px] text-gray-400">
+                                    {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                </span>
+                                <Lock size={10} className="text-gray-400" />
+                            </div>
                         </div>
                     )}
                 </div>
