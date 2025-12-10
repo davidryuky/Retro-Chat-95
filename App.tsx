@@ -31,6 +31,7 @@ const App: React.FC = () => {
   const peerRef = useRef<any>(null);
   const connRef = useRef<DataConnection | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const reconnectTimeoutRef = useRef<any>(null);
 
   // --- Effects ---
 
@@ -64,6 +65,15 @@ const App: React.FC = () => {
     };
   }, []);
 
+  // Cleanup on unmount
+  useEffect(() => {
+      return () => {
+          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+          if (connRef.current) connRef.current.close();
+          if (peerRef.current) peerRef.current.destroy();
+      };
+  }, []);
+
   // Scroll to bottom of chat
   useEffect(() => {
     if (screen === AppScreen.CHAT) {
@@ -85,7 +95,7 @@ const App: React.FC = () => {
 
       setSessionCode(parsed.rawCode);
       setRoomKey(parsed.key);
-      setStatus('Initializing Host...');
+      setStatus('Initializing...');
       setErrorMsg(null);
 
       // 2. Initialize Peer with the specific ID from the code
@@ -105,10 +115,18 @@ const App: React.FC = () => {
             
             if (!PeerCtor) throw new Error("PeerJS library error.");
 
-            // If we are host, we MUST use the custom ID derived from our code
-            // If we are guest, we can let PeerJS assign a random ID
-            const peerOptions: any = { debug: 1 };
+            // Standard STUN servers to prevent connection drops
+            const peerOptions: any = { 
+                debug: 1,
+                config: {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:global.stun.twilio.com:3478' }
+                    ]
+                }
+            };
             
+            // If we are host, we MUST use the custom ID derived from our code
             const peer = customId 
                 ? new PeerCtor(customId, peerOptions) 
                 : new PeerCtor(undefined, peerOptions);
@@ -116,8 +134,8 @@ const App: React.FC = () => {
             peer.on('open', (id: string) => {
                 console.log('My Peer ID:', id);
                 setStatus('Online');
+                setErrorMsg(null); // Clear errors on success
                 if (customId) {
-                    // Host is ready
                     setStatus('Waiting for Peer...');
                 }
             });
@@ -134,20 +152,48 @@ const App: React.FC = () => {
 
             peer.on('error', (err: any) => {
                 console.error('Peer error:', err);
-                if (err.type === 'unavailable-id') {
-                    // Rare collision on generated code
-                    setErrorMsg("Session ID collision. Please retry.");
-                    if (isHost) initHostSession(); // Retry generation
-                } else if (err.type === 'peer-unavailable') {
+                const type = err.type;
+
+                if (type === 'unavailable-id') {
+                    // ID collision. If host, try next code.
+                    if (isHost) {
+                        setErrorMsg("ID collision. Retrying...");
+                        setTimeout(initHostSession, 1000);
+                    } else {
+                        setErrorMsg("ID unavailable. Please retry.");
+                    }
+                } else if (type === 'peer-unavailable') {
                     setErrorMsg("Session not found. Check code.");
                     setStatus("Error");
+                } else if (type === 'network' || type === 'server-error' || err.message === 'Lost connection to server') {
+                    // Critical: Signaling server lost. Try to reconnect if not destroyed.
+                    if (peer && !peer.destroyed) {
+                        console.log("Connection lost, attempting reconnect...");
+                        setStatus("Reconnecting...");
+                        // Debounce reconnect
+                        if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+                        reconnectTimeoutRef.current = setTimeout(() => {
+                            peer.reconnect();
+                        }, 2000);
+                    }
                 } else {
-                    setErrorMsg(`Network Error: ${err.type}`);
+                    // Don't show generic errors if we are just reconnecting
+                    if (status !== 'Reconnecting...') {
+                        setErrorMsg(`Net Error: ${type || 'Unknown'}`);
+                    }
                 }
             });
 
             peer.on('disconnected', () => {
-                if (peer && !peer.destroyed) peer.reconnect();
+                console.log("Peer disconnected from server.");
+                // If we have an active chat, this is fine, we just can't make NEW connections.
+                // But we should try to reconnect to signaling server to be safe.
+                if (peer && !peer.destroyed) {
+                    if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+                    reconnectTimeoutRef.current = setTimeout(() => {
+                         peer.reconnect();
+                    }, 2000);
+                }
             });
 
             peerRef.current = peer;
@@ -174,10 +220,10 @@ const App: React.FC = () => {
       setStatus('Connecting...');
 
       // Initialize my own peer (random ID is fine for guest)
-      if (!peerRef.current) {
+      if (!peerRef.current || peerRef.current.destroyed) {
           await initializePeer();
           // Wait a moment for open
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
       if (peerRef.current) {
@@ -301,7 +347,8 @@ const App: React.FC = () => {
       setErrorMsg(null);
       
       if (host) {
-          initHostSession();
+          // Small timeout to allow destroy to complete
+          setTimeout(initHostSession, 100);
       }
   };
 
@@ -463,9 +510,7 @@ const App: React.FC = () => {
                 {status === 'Connected' ? <Wifi size={18} className="text-green-400"/> : <WifiOff size={18} className="text-red-400"/>}
                 <button 
                     onClick={() => {
-                        if(confirm("Terminate session?")) {
-                            window.location.href = window.location.pathname;
-                        }
+                       window.location.reload();
                     }}
                     className="w-8 h-8 bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black flex items-center justify-center"
                 >
