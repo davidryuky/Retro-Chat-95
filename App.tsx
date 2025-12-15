@@ -44,6 +44,9 @@ const App: React.FC = () => {
   // Typing Refs
   const typingSendTimeoutRef = useRef<any>(null);
   const typingReceiveTimeoutRef = useRef<any>(null);
+  
+  // State Refs for closures
+  const isHostRef = useRef<boolean>(true);
 
   // --- Effects ---
 
@@ -56,6 +59,9 @@ const App: React.FC = () => {
         console.log("Auto-join code detected");
     }
   }, []);
+
+  // Sync state to ref
+  useEffect(() => { isHostRef.current = isHost; }, [isHost]);
 
   // Cleanup on unmount or screen change
   useEffect(() => {
@@ -101,8 +107,9 @@ const App: React.FC = () => {
       setStatus('Initializing Host...');
       setErrorMsg(null);
       currentBrokerIndex.current = 0; // Reset broker priority
+      setIsHost(true);
 
-      connectToMqtt(parsed.rawCode, parsed.key);
+      connectToMqtt(parsed.rawCode, parsed.key, true);
   };
 
   const joinSession = async () => {
@@ -120,11 +127,12 @@ const App: React.FC = () => {
       setErrorMsg(null);
       setStatus('Locating Host...');
       currentBrokerIndex.current = 0; // Reset broker priority
+      setIsHost(false);
       
-      connectToMqtt(parsed.rawCode, parsed.key);
+      connectToMqtt(parsed.rawCode, parsed.key, false);
   };
 
-  const connectToMqtt = (code: string, key: string) => {
+  const connectToMqtt = (code: string, key: string, isHosting: boolean) => {
       // Disconnect if exists
       if (clientRef.current) {
           try { clientRef.current.end(); } catch(e) {}
@@ -157,22 +165,31 @@ const App: React.FC = () => {
               if (client && !client.connected) {
                   console.log("[NET] Connection timed out.");
                   client.end();
-                  tryNextBroker(code, key);
+                  tryNextBroker(code, key, isHosting);
               }
           }, 6000);
 
           client.on('connect', () => {
               if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
               console.log('[NET] MQTT Connected Securely');
-              setStatus('Secure Link Est.');
+              setStatus(isHosting ? 'Waiting for Peer...' : 'Secure Link Est.');
               
               // Subscribe to the specific room topic with QoS 1 (at least once delivery)
               client.subscribe(topic, { qos: 1 }, (err) => {
                   if (!err) {
-                      setScreen(AppScreen.CHAT);
                       setErrorMsg(null);
-                      // Announce presence (encrypted)
-                      sendSystemAnnouncement(client, topic, key, "USER_JOINED");
+                      
+                      // LOGIC CHANGE:
+                      // If Client: Enter chat immediately and say HELLO.
+                      // If Host: Wait on Setup screen until HELLO is received.
+                      
+                      if (!isHosting) {
+                          setScreen(AppScreen.CHAT);
+                          // Announce presence (encrypted) to wake up host
+                          setTimeout(() => {
+                              sendSystemAnnouncement(client, topic, key, "USER_JOINED");
+                          }, 500);
+                      }
                   } else {
                       setErrorMsg("Subscription Error");
                   }
@@ -202,8 +219,23 @@ const App: React.FC = () => {
                    if (msg.type === 'SYSTEM' && msg.payload) {
                        try {
                            const status = await decryptMessage(msg.payload, key);
-                           if (status === "USER_JOINED" && msg.sender !== username) {
-                               addSystemMessage(`${msg.sender} has entered.`);
+                           if (status === "USER_JOINED") {
+                               // If I am the host and I get a join message, enter chat now
+                               if (isHostRef.current) {
+                                   setScreen(AppScreen.CHAT);
+                                   // Send a welcome back so client knows I saw them
+                                   if (clientRef.current) {
+                                       sendSystemAnnouncement(clientRef.current, topic, key, "HOST_ACK");
+                                   }
+                               } 
+                               
+                               if (msg.sender !== username) {
+                                   addSystemMessage(`${msg.sender} entered the secure channel.`);
+                               }
+                           }
+                           else if (status === "HOST_ACK" && !isHostRef.current) {
+                               // Client received ack from host
+                               addSystemMessage("Secure handshake complete.");
                            }
                        } catch(e) {}
                    }
@@ -221,21 +253,19 @@ const App: React.FC = () => {
           client.on('close', () => {
               console.log("[NET] Connection closed.");
               // Only retry if we aren't purposely disconnected
-              if (screen !== AppScreen.LOGIN && screen !== AppScreen.SETUP) {
+              if (screen !== AppScreen.LOGIN && screen !== AppScreen.SETUP && status !== 'Waiting for Peer...') {
                   // Wait a brief moment then try next broker if we were not connected
-                  if (status !== 'Connected') {
-                      tryNextBroker(code, key);
-                  }
+                   tryNextBroker(code, key, isHosting);
               }
           });
 
       } catch (e: any) {
           console.error("MQTT Init Error:", e);
-          tryNextBroker(code, key);
+          tryNextBroker(code, key, isHosting);
       }
   };
 
-  const tryNextBroker = (code: string, key: string) => {
+  const tryNextBroker = (code: string, key: string, isHosting: boolean) => {
       // Cycle to next broker
       currentBrokerIndex.current = (currentBrokerIndex.current + 1) % BROKER_LIST.length;
       
@@ -248,7 +278,7 @@ const App: React.FC = () => {
       
       // Small delay before retry to prevent rapid loops
       setTimeout(() => {
-          connectToMqtt(code, key);
+          connectToMqtt(code, key, isHosting);
       }, 1000);
   };
 
@@ -501,6 +531,7 @@ const App: React.FC = () => {
                                 <Globe size={32} className={status.includes('Dialing') || status.includes('Init') ? "animate-spin" : ""}/>
                                 <span className="font-bold">{status}</span>
                                 {status.includes('Dialing') && <span className="text-xs max-w-[200px] text-center">Establishing secure SSL tunnel...</span>}
+                                {status === 'Waiting for Peer...' && <span className="text-xs text-blue-800 font-bold animate-pulse mt-2">Waiting for client to join...</span>}
                             </div>
                         </div>
                     ) : (
