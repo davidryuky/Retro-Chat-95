@@ -5,12 +5,9 @@ import { Win95Window, Win95Button, Win95Input, Win95Panel } from './components/R
 import { encryptMessage, decryptMessage, generateRandomName, generateSessionCode, parseSessionCode } from './utils/crypto';
 import { Message, AppScreen, NetworkMessage } from './types';
 
-// Robust List of SSL/WSS Brokers (Port 8084 is standard for Secure MQTT over WebSockets)
-const BROKER_LIST = [
-    'wss://broker.emqx.io:8084/mqtt',      // Primary: High availability, SSL
-    'wss://public.mqtthq.com:8084/mqtt',   // Backup 1
-    'wss://test.mosquitto.org:8081'        // Backup 2 (Port 8081 is Mosquitto WSS)
-];
+// Single Robust Broker to prevent "Split Brain" (Host on one server, Client on another)
+// EMQX Public Broker is widely accessible and supports WSS (Secure WebSocket) on port 8084.
+const BROKER_URL = 'wss://broker.emqx.io:8084/mqtt';
 
 const App: React.FC = () => {
   // --- State ---
@@ -38,8 +35,9 @@ const App: React.FC = () => {
   const clientRef = useRef<mqtt.MqttClient | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const topicRef = useRef<string>('');
-  const currentBrokerIndex = useRef<number>(0);
-  const connectionTimeoutRef = useRef<any>(null);
+  
+  // Handshake Refs
+  const handshakeIntervalRef = useRef<any>(null);
   
   // Typing Refs
   const typingSendTimeoutRef = useRef<any>(null);
@@ -47,6 +45,7 @@ const App: React.FC = () => {
   
   // State Refs for closures
   const isHostRef = useRef<boolean>(true);
+  const usernameRef = useRef<string>('');
 
   // --- Effects ---
 
@@ -62,16 +61,15 @@ const App: React.FC = () => {
 
   // Sync state to ref
   useEffect(() => { isHostRef.current = isHost; }, [isHost]);
+  useEffect(() => { usernameRef.current = username; }, [username]);
 
   // Cleanup on unmount or screen change
   useEffect(() => {
       return () => {
           if (clientRef.current) {
-              try {
-                clientRef.current.end();
-              } catch(e) {}
+              try { clientRef.current.end(); } catch(e) {}
           }
-          if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
+          if (handshakeIntervalRef.current) clearInterval(handshakeIntervalRef.current);
       };
   }, []);
 
@@ -104,9 +102,8 @@ const App: React.FC = () => {
 
       setSessionCode(parsed.rawCode);
       setRoomKey(parsed.key);
-      setStatus('Initializing Host...');
+      setStatus('Initializing...');
       setErrorMsg(null);
-      currentBrokerIndex.current = 0; // Reset broker priority
       setIsHost(true);
 
       connectToMqtt(parsed.rawCode, parsed.key, true);
@@ -125,8 +122,7 @@ const App: React.FC = () => {
       setSessionCode(parsed.rawCode);
       setRoomKey(parsed.key);
       setErrorMsg(null);
-      setStatus('Locating Host...');
-      currentBrokerIndex.current = 0; // Reset broker priority
+      setStatus('Connecting...');
       setIsHost(false);
       
       connectToMqtt(parsed.rawCode, parsed.key, false);
@@ -139,71 +135,77 @@ const App: React.FC = () => {
           clientRef.current = null;
       }
 
-      const brokerUrl = BROKER_LIST[currentBrokerIndex.current];
-      // Create a unique topic based on the code
-      const topic = `rc95/s/${code}`;
+      // Unique topic for this session
+      const topic = `rc95/v2/${code}`;
       topicRef.current = topic;
 
-      console.log(`[NET] Attempting connection to ${brokerUrl}`);
-      setStatus(`Dialing Relay ${currentBrokerIndex.current + 1}...`);
+      console.log(`[NET] Connecting to ${BROKER_URL}`);
+      setStatus('Dialing Secure Relay...');
 
       try {
-          // Connection options optimized for stability
-          const client = mqtt.connect(brokerUrl, {
+          const client = mqtt.connect(BROKER_URL, {
               clientId: 'rc95_' + Math.random().toString(16).substr(2, 8),
-              keepalive: 30, // Frequent heartbeats
+              keepalive: 60,
               clean: true,
-              connectTimeout: 5000, // 5s timeout before trying next
-              reconnectPeriod: 0, // We handle reconnection manually to switch brokers
-              protocolVersion: 5 // Use MQTT 5 if available
+              connectTimeout: 10000,
+              reconnectPeriod: 2000, // Auto reconnect every 2s if failed
           });
 
           clientRef.current = client;
 
-          // Timeout failsafe
-          connectionTimeoutRef.current = setTimeout(() => {
-              if (client && !client.connected) {
-                  console.log("[NET] Connection timed out.");
-                  client.end();
-                  tryNextBroker(code, key, isHosting);
-              }
-          }, 6000);
-
           client.on('connect', () => {
-              if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
-              console.log('[NET] MQTT Connected Securely');
-              setStatus(isHosting ? 'Waiting for Peer...' : 'Secure Link Est.');
+              console.log('[NET] Connected to Broker');
+              setStatus(isHosting ? 'Waiting for Peer...' : 'Paging Host...');
               
-              // Subscribe to the specific room topic with QoS 1 (at least once delivery)
               client.subscribe(topic, { qos: 1 }, (err) => {
                   if (!err) {
-                      setErrorMsg(null);
-                      
-                      // LOGIC CHANGE:
-                      // If Client: Enter chat immediately and say HELLO.
-                      // If Host: Wait on Setup screen until HELLO is received.
-                      
                       if (!isHosting) {
-                          setScreen(AppScreen.CHAT);
-                          // Announce presence (encrypted) to wake up host
-                          setTimeout(() => {
-                              sendSystemAnnouncement(client, topic, key, "USER_JOINED");
-                          }, 500);
+                          // CLIENT LOGIC: Start Handshake Loop
+                          // Send "USER_JOINED" every 1.5s until Host responds
+                          startHandshakeLoop(client, topic, key);
                       }
                   } else {
-                      setErrorMsg("Subscription Error");
+                      setErrorMsg("Channel Sub Failed");
                   }
               });
           });
 
           client.on('message', async (topic, message) => {
                try {
-                   // Message is Buffer, convert to string -> JSON
                    const payloadStr = message.toString();
                    const msg = JSON.parse(payloadStr) as NetworkMessage;
 
-                   // Ignore messages from myself
-                   if (msg.sender === username && msg.type !== 'SYSTEM') return;
+                   // Ignore own messages
+                   if (msg.sender === usernameRef.current && msg.type !== 'SYSTEM') return;
+
+                   // --- HANDSHAKE LOGIC ---
+                   if (msg.type === 'SYSTEM' && msg.payload) {
+                       try {
+                           const statusMsg = await decryptMessage(msg.payload, key);
+                           
+                           // HOST LOGIC: Received Join Request
+                           if (statusMsg === "USER_JOINED") {
+                               if (isHostRef.current) {
+                                   // Acknowledge the client
+                                   sendSystemAnnouncement(client, topic, key, "HOST_ACK");
+                                   // Enter chat if not already
+                                   setScreen(AppScreen.CHAT);
+                               }
+                           }
+                           
+                           // CLIENT LOGIC: Received Host Acknowledgement
+                           if (statusMsg === "HOST_ACK") {
+                               if (!isHostRef.current) {
+                                   // Stop pestering the host
+                                   if (handshakeIntervalRef.current) clearInterval(handshakeIntervalRef.current);
+                                   setScreen(AppScreen.CHAT);
+                                   addSystemMessage("Secure Connection Established.");
+                               }
+                           }
+                           
+                       } catch(e) {}
+                   }
+                   // -----------------------
 
                    if (msg.type === 'TYPING') {
                        handleRemoteTyping();
@@ -215,71 +217,40 @@ const App: React.FC = () => {
                        addMessage(msg.sender || 'Unknown', decryptedText);
                        sendNotification(msg.sender || 'User', decryptedText);
                    }
-                   
-                   if (msg.type === 'SYSTEM' && msg.payload) {
-                       try {
-                           const status = await decryptMessage(msg.payload, key);
-                           if (status === "USER_JOINED") {
-                               // If I am the host and I get a join message, enter chat now
-                               if (isHostRef.current) {
-                                   setScreen(AppScreen.CHAT);
-                                   // Send a welcome back so client knows I saw them
-                                   if (clientRef.current) {
-                                       sendSystemAnnouncement(clientRef.current, topic, key, "HOST_ACK");
-                                   }
-                               } 
-                               
-                               if (msg.sender !== username) {
-                                   addSystemMessage(`${msg.sender} entered the secure channel.`);
-                               }
-                           }
-                           else if (status === "HOST_ACK" && !isHostRef.current) {
-                               // Client received ack from host
-                               addSystemMessage("Secure handshake complete.");
-                           }
-                       } catch(e) {}
-                   }
 
                } catch (e) {
-                   console.error("Message processing error", e);
+                   console.error("Msg Error", e);
                }
           });
 
           client.on('error', (err) => {
-              console.error('[NET] Socket Error: ', err);
-              // Do not immediately fail, allow 'close' or timeout to handle retry
+              console.error('[NET] Error: ', err);
+              // setStatus('Net Error. Retrying...');
           });
 
-          client.on('close', () => {
-              console.log("[NET] Connection closed.");
-              // Only retry if we aren't purposely disconnected
-              if (screen !== AppScreen.LOGIN && screen !== AppScreen.SETUP && status !== 'Waiting for Peer...') {
-                  // Wait a brief moment then try next broker if we were not connected
-                   tryNextBroker(code, key, isHosting);
-              }
+          client.on('reconnect', () => {
+              setStatus('Reconnecting...');
           });
 
       } catch (e: any) {
           console.error("MQTT Init Error:", e);
-          tryNextBroker(code, key, isHosting);
+          setErrorMsg("Connection Failed");
       }
   };
 
-  const tryNextBroker = (code: string, key: string, isHosting: boolean) => {
-      // Cycle to next broker
-      currentBrokerIndex.current = (currentBrokerIndex.current + 1) % BROKER_LIST.length;
+  const startHandshakeLoop = (client: mqtt.MqttClient, topic: string, key: string) => {
+      if (handshakeIntervalRef.current) clearInterval(handshakeIntervalRef.current);
       
-      // If we looped back to start, show error but keep trying
-      if (currentBrokerIndex.current === 0) {
-           setErrorMsg("Retrying Connection...");
-      }
-
-      console.log(`[NET] Switching to broker index: ${currentBrokerIndex.current}`);
+      // Send immediately
+      sendSystemAnnouncement(client, topic, key, "USER_JOINED");
       
-      // Small delay before retry to prevent rapid loops
-      setTimeout(() => {
-          connectToMqtt(code, key, isHosting);
-      }, 1000);
+      // Then loop
+      handshakeIntervalRef.current = setInterval(() => {
+          if (client.connected) {
+             console.log("[NET] Pinging Host...");
+             sendSystemAnnouncement(client, topic, key, "USER_JOINED");
+          }
+      }, 1500);
   };
 
   const handleRemoteTyping = () => {
@@ -293,10 +264,6 @@ const App: React.FC = () => {
   // Keep ref updated for callbacks
   const roomKeyRef = useRef(roomKey);
   useEffect(() => { roomKeyRef.current = roomKey; }, [roomKey]);
-  
-  // Use a ref for username to access in closures
-  const usernameRef = useRef(username);
-  useEffect(() => { usernameRef.current = username; }, [username]);
 
   // Handle typing indicator transmission
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -323,8 +290,7 @@ const App: React.FC = () => {
               sender: usernameRef.current,
               payload: encrypted
           };
-          // QoS 1 ensures delivery
-          client.publish(topic, JSON.stringify(netMsg), { qos: 1 });
+          client.publish(topic, JSON.stringify(netMsg), { qos: 0 }); // QoS 0 for system pings to reduce overhead
       } catch (e) {}
   };
 
@@ -349,19 +315,25 @@ const App: React.FC = () => {
               addSystemMessage("Encryption failed.");
           }
       } else {
-          addSystemMessage("Connection lost. Retrying...");
-          if (clientRef.current) clientRef.current.reconnect();
+          addSystemMessage("Not connected to Relay.");
       }
   };
 
   const addMessage = (sender: string, content: string, isSystem = false) => {
-      setMessages(prev => [...prev, {
-          id: Date.now().toString() + Math.random(),
-          sender,
-          content,
-          timestamp: Date.now(),
-          isSystem
-      }]);
+      setMessages(prev => {
+          // Deduplication check for unstable connections
+          const lastMsg = prev[prev.length - 1];
+          if (lastMsg && lastMsg.content === content && lastMsg.sender === sender && (Date.now() - lastMsg.timestamp < 1000)) {
+              return prev;
+          }
+          return [...prev, {
+            id: Date.now().toString() + Math.random(),
+            sender,
+            content,
+            timestamp: Date.now(),
+            isSystem
+          }];
+      });
   };
 
   const addSystemMessage = (content: string) => {
@@ -412,6 +384,7 @@ const App: React.FC = () => {
       setJoinCodeInput('');
       setStatus('Offline');
       setErrorMsg(null);
+      if (handshakeIntervalRef.current) clearInterval(handshakeIntervalRef.current);
       
       if (host) {
           setTimeout(initHostSession, 100);
@@ -528,10 +501,10 @@ const App: React.FC = () => {
                             </div>
                             
                             <div className="mt-8 flex flex-col items-center justify-center gap-2 text-gray-600">
-                                <Globe size={32} className={status.includes('Dialing') || status.includes('Init') ? "animate-spin" : ""}/>
+                                <Globe size={32} className={status.includes('Dialing') || status.includes('Connect') ? "animate-spin" : ""}/>
                                 <span className="font-bold">{status}</span>
-                                {status.includes('Dialing') && <span className="text-xs max-w-[200px] text-center">Establishing secure SSL tunnel...</span>}
                                 {status === 'Waiting for Peer...' && <span className="text-xs text-blue-800 font-bold animate-pulse mt-2">Waiting for client to join...</span>}
+                                {status === 'Paging Host...' && <span className="text-xs text-blue-800 font-bold animate-pulse mt-2">Signaling Host Frequency...</span>}
                             </div>
                         </div>
                     ) : (
@@ -549,13 +522,13 @@ const App: React.FC = () => {
                             </div>
 
                             <Win95Button onClick={joinSession} className="w-full mt-6 py-4 text-lg font-bold">
-                                {status.includes('Dialing') ? 'CONNECTING...' : 'ESTABLISH LINK'}
+                                {status.includes('Dialing') || status.includes('Connecting') ? 'CONNECTING...' : 'ESTABLISH LINK'}
                             </Win95Button>
                             
-                            {status.includes('Dialing') && (
+                            {(status.includes('Dialing') || status.includes('Paging')) && (
                                 <div className="mt-4 flex flex-col items-center justify-center text-xs text-gray-500 animate-pulse">
                                     <Globe size={24} className="mb-1 animate-spin"/>
-                                    Dialing host frequency...
+                                    {status}
                                 </div>
                             )}
                         </div>
@@ -581,7 +554,7 @@ const App: React.FC = () => {
                 <span>CHAT_{sessionCode.substring(0,6)}</span>
             </div>
             <div className="flex items-center gap-3">
-                {status === 'Connected' || status === 'Secure Link Est.' ? <Wifi size={18} className="text-green-400"/> : <WifiOff size={18} className="text-red-400"/>}
+                {status.includes('Reconnecting') ? <WifiOff size={18} className="text-red-400"/> : <Wifi size={18} className="text-green-400"/>}
                 
                 <button 
                     onClick={() => {
