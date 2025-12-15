@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Peer, DataConnection } from 'peerjs';
-import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2, Maximize2, Activity, Lock, Globe } from 'lucide-react';
+import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2, Maximize2, Activity, Lock, Globe, Monitor, Info, Power, HelpCircle } from 'lucide-react';
 import { Win95Window, Win95Button, Win95Input, Win95Panel } from './components/RetroUI';
 import { encryptMessage, decryptMessage, generateRandomName, generateSessionCode, parseSessionCode } from './utils/crypto';
 import { Message, AppScreen, NetworkMessage } from './types';
@@ -10,6 +10,10 @@ const App: React.FC = () => {
   const [screen, setScreen] = useState<AppScreen>(AppScreen.LOGIN);
   const [username, setUsername] = useState<string>('');
   
+  // UI States
+  const [isStartMenuOpen, setIsStartMenuOpen] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
+
   // Connection Setup
   const [isHost, setIsHost] = useState<boolean>(true);
   const [sessionCode, setSessionCode] = useState<string>(''); 
@@ -76,9 +80,6 @@ const App: React.FC = () => {
   useEffect(() => {
       const handleVisibilityChange = () => {
           if (document.visibilityState === 'visible' && screen === AppScreen.CHAT) {
-              // Acknowledge all unread messages from remote sender
-              // We don't track "unread" locally strictly, so we just blindly ACK the last few incoming messages
-              // to ensure the sender gets their 'vv'.
               const incoming = messagesRef.current.filter(m => m.sender !== usernameRef.current && !m.isSystem);
               incoming.slice(-5).forEach(msg => {
                   sendReadReceipt(msg.id);
@@ -128,10 +129,6 @@ const App: React.FC = () => {
           if (msg.type === 'CHAT' && msg.payload) {
               const decryptedText = await decryptMessage(msg.payload, roomKeyRef.current);
               
-              // We use the ID sent by the sender if available, or generate one (though sender ID is better for receipts)
-              // Since existing code generated ID locally, let's fix that in sendMessage first.
-              // For now, assume msg.messageId exists or use payload as proxy (imperfect).
-              // Let's rely on the sender passing messageId in the NetworkMessage wrapper.
               const msgId = msg.messageId || Date.now().toString();
 
               addMessage(msg.sender || 'Unknown', decryptedText, false, msgId);
@@ -348,7 +345,7 @@ const App: React.FC = () => {
                   type: 'CHAT',
                   sender: username,
                   payload: encrypted,
-                  messageId: newMsgId // Critical: Send the ID so receiver can reference it in receipt
+                  messageId: newMsgId 
               };
               connRef.current.send(JSON.stringify(msg));
           } catch (e) {
@@ -432,11 +429,61 @@ const App: React.FC = () => {
       return `${window.location.origin}${window.location.pathname}?join=${sessionCode}`;
   };
 
+  const toggleFullscreen = () => {
+     if (!document.fullscreenElement) {
+         document.documentElement.requestFullscreen().catch(() => {});
+     } else {
+         document.exitFullscreen().catch(() => {});
+     }
+     setIsStartMenuOpen(false);
+  };
+
   // --- RENDER ---
+
+  // RENDER: About Window
+  const renderAboutWindow = () => {
+      if (!showAbout) return null;
+      return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+              <Win95Window 
+                title="About RetroChat 95" 
+                className="w-full max-w-sm shadow-xl"
+                onClose={() => setShowAbout(false)}
+                icon={<Info size={16} className="text-white"/>}
+              >
+                  <div className="p-4 bg-[#c0c0c0] flex flex-col gap-4 text-center">
+                       <div className="flex justify-center items-center gap-4">
+                           <ShieldCheck size={48} className="text-[#000080]" />
+                           <div className="text-left">
+                                <h2 className="font-bold text-xl">RetroChat 95</h2>
+                                <p className="text-xs text-gray-600">Version 1.0 (Build 95)</p>
+                           </div>
+                       </div>
+                       
+                       <div className="border-2 border-t-black border-l-black border-b-white border-r-white p-4 bg-white text-left text-sm font-mono leading-tight">
+                           <p className="mb-4">
+                               A nostalgic journey back to 1995, featuring secure peer-to-peer encryption for private conversations.
+                           </p>
+                           
+                           <p className="mb-1 text-gray-600">Developed by:</p>
+                           <a href="https://www.davi.design" target="_blank" rel="noopener noreferrer" className="text-blue-800 font-bold underline cursor-pointer hover:bg-blue-800 hover:text-white">
+                               www.davi.design
+                           </a>
+                       </div>
+                       
+                       <div className="flex justify-center">
+                            <Win95Button onClick={() => setShowAbout(false)} className="w-24">OK</Win95Button>
+                       </div>
+                  </div>
+              </Win95Window>
+          </div>
+      );
+  };
 
   if (screen === AppScreen.LOGIN) {
       return (
           <div className="flex-1 flex flex-col items-center justify-center p-4 bg-[#008080]">
+               {renderAboutWindow()}
                <Win95Window title="RetroChat 95" className="w-full max-w-sm shadow-[8px_8px_0_rgba(0,0,0,0.5)]">
                    <div className="p-6 flex flex-col gap-6 text-center bg-[#c0c0c0]">
                        <div className="flex justify-center mb-2">
@@ -483,6 +530,7 @@ const App: React.FC = () => {
   if (screen === AppScreen.SETUP) {
       return (
         <div className="flex-1 flex flex-col items-center justify-center bg-[#008080] p-4">
+             {renderAboutWindow()}
              <Win95Window title="Network Config" className="w-full max-w-lg shadow-[8px_8px_0_rgba(0,0,0,0.5)] flex flex-col max-h-full">
                 <div className="flex gap-1 p-2 pb-0 bg-[#c0c0c0] shrink-0">
                     <button 
@@ -577,6 +625,13 @@ const App: React.FC = () => {
   // 3. CHAT SCREEN
   return (
     <div className="fixed inset-0 w-full h-full bg-[#c0c0c0] flex flex-col overflow-hidden">
+        {/* Transparent backdrop to close start menu when clicking outside */}
+        {isStartMenuOpen && (
+            <div className="fixed inset-0 z-20 bg-transparent" onClick={() => setIsStartMenuOpen(false)}></div>
+        )}
+        
+        {renderAboutWindow()}
+
         <div className="h-12 bg-[#000080] flex items-center justify-between px-3 shadow-md shrink-0 z-10">
             <div className="flex items-center gap-2 text-white font-bold text-lg truncate">
                 <Terminal size={18} />
@@ -586,25 +641,10 @@ const App: React.FC = () => {
                 {status === 'Connected' ? <Wifi size={18} className="text-green-400"/> : <WifiOff size={18} className="text-red-400"/>}
                 
                 <button 
-                    onClick={() => {
-                        if (!document.fullscreenElement) {
-                             document.documentElement.requestFullscreen().catch(() => {});
-                        } else {
-                             document.exitFullscreen().catch(() => {});
-                        }
-                    }}
+                    onClick={toggleFullscreen}
                     className="w-8 h-8 bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black flex items-center justify-center active:border-t-black active:border-l-black active:border-b-white active:border-r-white"
                 >
                     <Maximize2 size={16} className="text-black" />
-                </button>
-
-                <button 
-                    onClick={() => {
-                       window.location.reload();
-                    }}
-                    className="w-8 h-8 bg-[#c0c0c0] border-2 border-t-white border-l-white border-b-black border-r-black flex items-center justify-center active:border-t-black active:border-l-black active:border-b-white active:border-r-white"
-                >
-                    <LogOut size={16} className="text-black" />
                 </button>
             </div>
         </div>
@@ -693,12 +733,60 @@ const App: React.FC = () => {
             </div>
         </div>
         
+        {/* START MENU POPUP */}
+        {isStartMenuOpen && (
+            <div className="absolute bottom-9 left-1 z-50 flex shadow-[4px_4px_0_rgba(0,0,0,0.5)]">
+                 {/* Blue Branding Strip */}
+                 <div className="bg-[#000080] w-8 flex items-end pb-2 justify-center border-2 border-t-white border-l-white border-b-black border-r-black">
+                     <span className="text-white font-bold text-lg whitespace-nowrap -rotate-90 tracking-widest origin-bottom translate-y-[-10px]">
+                         RetroChat 95
+                     </span>
+                 </div>
+                 
+                 {/* Menu Items */}
+                 <div className="bg-[#c0c0c0] border-2 border-t-white border-b-black border-r-black border-l-0 p-1 flex flex-col min-w-[160px]">
+                     <button onClick={() => { setIsStartMenuOpen(false); setShowAbout(true); }} className="flex items-center gap-2 px-2 py-2 hover:bg-[#000080] hover:text-white group text-left">
+                         <HelpCircle size={20} className="text-[#000080] group-hover:text-white" />
+                         <span className="text-sm font-bold">About RetroChat</span>
+                     </button>
+                     
+                     <button onClick={toggleFullscreen} className="flex items-center gap-2 px-2 py-2 hover:bg-[#000080] hover:text-white group text-left">
+                         <Monitor size={20} className="text-black group-hover:text-white" />
+                         <span className="text-sm">Fullscreen</span>
+                     </button>
+
+                     {sessionCode && (
+                        <button onClick={() => { setIsStartMenuOpen(false); copyToClipboard(getShareLink()); }} className="flex items-center gap-2 px-2 py-2 hover:bg-[#000080] hover:text-white group text-left">
+                            <Share2 size={20} className="text-black group-hover:text-white" />
+                            <span className="text-sm">Copy Invite</span>
+                        </button>
+                     )}
+
+                     <div className="h-[2px] bg-white border-b border-gray-500 my-1 mx-1"></div>
+                     
+                     <button onClick={() => window.location.reload()} className="flex items-center gap-2 px-2 py-2 hover:bg-[#000080] hover:text-white group text-left">
+                         <Power size={20} className="text-black group-hover:text-white" />
+                         <span className="text-sm">Shut Down...</span>
+                     </button>
+                 </div>
+            </div>
+        )}
+
         {/* Taskbar */}
-        <div className="h-8 bg-[#c0c0c0] border-t-2 border-white flex items-center px-2 shrink-0 select-none pb-safe-bottom">
-            <div className="border-2 border-t-white border-l-white border-b-black border-r-black px-2 py-0.5 flex items-center gap-1 active:border-t-black active:border-l-black active:border-b-white active:border-r-white cursor-pointer mr-2">
+        <div className="h-8 bg-[#c0c0c0] border-t-2 border-white flex items-center px-2 shrink-0 select-none pb-safe-bottom z-30">
+            <button 
+                onClick={() => setIsStartMenuOpen(!isStartMenuOpen)}
+                className={`
+                    border-2 px-2 py-0.5 flex items-center gap-1 cursor-pointer mr-2
+                    ${isStartMenuOpen 
+                        ? 'border-t-black border-l-black border-b-white border-r-white bg-gray-300' 
+                        : 'border-t-white border-l-white border-b-black border-r-black hover:active:border-t-black hover:active:border-l-black hover:active:border-b-white hover:active:border-r-white'
+                    }
+                `}
+            >
                 <img src="https://win98icons.alexmeub.com/icons/png/windows_slanted-1.png" className="w-4 h-4" alt="start" />
                 <span className="italic font-black text-sm">Start</span>
-            </div>
+            </button>
             <div className="w-[2px] h-5 bg-gray-400 shadow-[1px_0_white] mr-2"></div>
             <div className="flex-1 bg-black/10 border border-b-white border-r-white border-t-black border-l-black px-2 py-0.5 truncate text-xs text-white bg-[#000080]">
                  RetroChat
