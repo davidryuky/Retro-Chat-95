@@ -5,6 +5,13 @@ import { Win95Window, Win95Button, Win95Input, Win95Panel } from './components/R
 import { encryptMessage, decryptMessage, generateRandomName, generateSessionCode, parseSessionCode } from './utils/crypto';
 import { Message, AppScreen, NetworkMessage } from './types';
 
+// Robust List of SSL/WSS Brokers (Port 8084 is standard for Secure MQTT over WebSockets)
+const BROKER_LIST = [
+    'wss://broker.emqx.io:8084/mqtt',      // Primary: High availability, SSL
+    'wss://public.mqtthq.com:8084/mqtt',   // Backup 1
+    'wss://test.mosquitto.org:8081'        // Backup 2 (Port 8081 is Mosquitto WSS)
+];
+
 const App: React.FC = () => {
   // --- State ---
   const [screen, setScreen] = useState<AppScreen>(AppScreen.LOGIN);
@@ -31,6 +38,8 @@ const App: React.FC = () => {
   const clientRef = useRef<mqtt.MqttClient | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const topicRef = useRef<string>('');
+  const currentBrokerIndex = useRef<number>(0);
+  const connectionTimeoutRef = useRef<any>(null);
   
   // Typing Refs
   const typingSendTimeoutRef = useRef<any>(null);
@@ -56,6 +65,7 @@ const App: React.FC = () => {
                 clientRef.current.end();
               } catch(e) {}
           }
+          if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
       };
   }, []);
 
@@ -88,8 +98,9 @@ const App: React.FC = () => {
 
       setSessionCode(parsed.rawCode);
       setRoomKey(parsed.key);
-      setStatus('Connecting to Relay...');
+      setStatus('Initializing Host...');
       setErrorMsg(null);
+      currentBrokerIndex.current = 0; // Reset broker priority
 
       connectToMqtt(parsed.rawCode, parsed.key);
   };
@@ -107,7 +118,8 @@ const App: React.FC = () => {
       setSessionCode(parsed.rawCode);
       setRoomKey(parsed.key);
       setErrorMsg(null);
-      setStatus('Connecting to Relay...');
+      setStatus('Locating Host...');
+      currentBrokerIndex.current = 0; // Reset broker priority
       
       connectToMqtt(parsed.rawCode, parsed.key);
   };
@@ -115,41 +127,54 @@ const App: React.FC = () => {
   const connectToMqtt = (code: string, key: string) => {
       // Disconnect if exists
       if (clientRef.current) {
-          clientRef.current.end();
+          try { clientRef.current.end(); } catch(e) {}
+          clientRef.current = null;
       }
 
-      // Architecture: MQTT over WebSockets.
-      // This uses a public broker but keeps messages E2EE encrypted.
-      // This works on 4G, Different Wifi, Different Countries because it uses standard HTTP ports.
-      const brokerUrl = 'wss://broker.hivemq.com:8000/mqtt';
-      const topic = `retrochat95/v1/channel/${code}`;
+      const brokerUrl = BROKER_LIST[currentBrokerIndex.current];
+      // Create a unique topic based on the code
+      const topic = `rc95/s/${code}`;
       topicRef.current = topic;
 
-      console.log(`Connecting to ${brokerUrl} on topic ${topic}`);
+      console.log(`[NET] Attempting connection to ${brokerUrl}`);
+      setStatus(`Dialing Relay ${currentBrokerIndex.current + 1}...`);
 
       try {
+          // Connection options optimized for stability
           const client = mqtt.connect(brokerUrl, {
               clientId: 'rc95_' + Math.random().toString(16).substr(2, 8),
-              keepalive: 60,
+              keepalive: 30, // Frequent heartbeats
               clean: true,
-              reconnectPeriod: 1000,
+              connectTimeout: 5000, // 5s timeout before trying next
+              reconnectPeriod: 0, // We handle reconnection manually to switch brokers
+              protocolVersion: 5 // Use MQTT 5 if available
           });
 
           clientRef.current = client;
 
+          // Timeout failsafe
+          connectionTimeoutRef.current = setTimeout(() => {
+              if (client && !client.connected) {
+                  console.log("[NET] Connection timed out.");
+                  client.end();
+                  tryNextBroker(code, key);
+              }
+          }, 6000);
+
           client.on('connect', () => {
-              console.log('MQTT Connected');
-              setStatus('Connected');
+              if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
+              console.log('[NET] MQTT Connected Securely');
+              setStatus('Secure Link Est.');
               
-              // Subscribe to the specific room topic
-              client.subscribe(topic, (err) => {
+              // Subscribe to the specific room topic with QoS 1 (at least once delivery)
+              client.subscribe(topic, { qos: 1 }, (err) => {
                   if (!err) {
                       setScreen(AppScreen.CHAT);
                       setErrorMsg(null);
                       // Announce presence (encrypted)
                       sendSystemAnnouncement(client, topic, key, "USER_JOINED");
                   } else {
-                      setErrorMsg("Subscription Failed");
+                      setErrorMsg("Subscription Error");
                   }
               });
           });
@@ -175,13 +200,10 @@ const App: React.FC = () => {
                    }
                    
                    if (msg.type === 'SYSTEM' && msg.payload) {
-                       // Optional: Decrypt system messages if you want them secure too
-                       // For now assuming system messages might be plaintext status codes or encrypted
-                       // Let's assume encrypted for consistency
                        try {
                            const status = await decryptMessage(msg.payload, key);
                            if (status === "USER_JOINED" && msg.sender !== username) {
-                               addSystemMessage(`${msg.sender} connected via Relay.`);
+                               addSystemMessage(`${msg.sender} has entered.`);
                            }
                        } catch(e) {}
                    }
@@ -192,19 +214,42 @@ const App: React.FC = () => {
           });
 
           client.on('error', (err) => {
-              console.error('Connection error: ', err);
-              setStatus('Net Error');
-              setErrorMsg('Connection unstable. Retrying...');
+              console.error('[NET] Socket Error: ', err);
+              // Do not immediately fail, allow 'close' or timeout to handle retry
           });
 
-          client.on('offline', () => {
-              setStatus('Reconnecting...');
+          client.on('close', () => {
+              console.log("[NET] Connection closed.");
+              // Only retry if we aren't purposely disconnected
+              if (screen !== AppScreen.LOGIN && screen !== AppScreen.SETUP) {
+                  // Wait a brief moment then try next broker if we were not connected
+                  if (status !== 'Connected') {
+                      tryNextBroker(code, key);
+                  }
+              }
           });
 
       } catch (e: any) {
-          console.error("MQTT Error:", e);
-          setErrorMsg("Init Failed.");
+          console.error("MQTT Init Error:", e);
+          tryNextBroker(code, key);
       }
+  };
+
+  const tryNextBroker = (code: string, key: string) => {
+      // Cycle to next broker
+      currentBrokerIndex.current = (currentBrokerIndex.current + 1) % BROKER_LIST.length;
+      
+      // If we looped back to start, show error but keep trying
+      if (currentBrokerIndex.current === 0) {
+           setErrorMsg("Retrying Connection...");
+      }
+
+      console.log(`[NET] Switching to broker index: ${currentBrokerIndex.current}`);
+      
+      // Small delay before retry to prevent rapid loops
+      setTimeout(() => {
+          connectToMqtt(code, key);
+      }, 1000);
   };
 
   const handleRemoteTyping = () => {
@@ -248,7 +293,8 @@ const App: React.FC = () => {
               sender: usernameRef.current,
               payload: encrypted
           };
-          client.publish(topic, JSON.stringify(netMsg));
+          // QoS 1 ensures delivery
+          client.publish(topic, JSON.stringify(netMsg), { qos: 1 });
       } catch (e) {}
   };
 
@@ -268,12 +314,13 @@ const App: React.FC = () => {
                   sender: username,
                   payload: encrypted
               };
-              clientRef.current.publish(topicRef.current, JSON.stringify(netMsg));
+              clientRef.current.publish(topicRef.current, JSON.stringify(netMsg), { qos: 1 });
           } catch (e) {
               addSystemMessage("Encryption failed.");
           }
       } else {
-          addSystemMessage("Not connected to Relay.");
+          addSystemMessage("Connection lost. Retrying...");
+          if (clientRef.current) clientRef.current.reconnect();
       }
   };
 
@@ -328,7 +375,7 @@ const App: React.FC = () => {
   const switchMode = (host: boolean) => {
       setIsHost(host);
       if (clientRef.current) {
-          clientRef.current.end();
+          try { clientRef.current.end(); } catch(e) {}
           clientRef.current = null;
       }
       setSessionCode('');
@@ -451,9 +498,9 @@ const App: React.FC = () => {
                             </div>
                             
                             <div className="mt-8 flex flex-col items-center justify-center gap-2 text-gray-600">
-                                <Globe size={32} className={status.includes('Reconnecting') || status.includes('Connecting') ? "animate-spin" : ""}/>
+                                <Globe size={32} className={status.includes('Dialing') || status.includes('Init') ? "animate-spin" : ""}/>
                                 <span className="font-bold">{status}</span>
-                                {status.includes('Connecting') && <span className="text-xs max-w-[200px] text-center">Contacting secure relay server...</span>}
+                                {status.includes('Dialing') && <span className="text-xs max-w-[200px] text-center">Establishing secure SSL tunnel...</span>}
                             </div>
                         </div>
                     ) : (
@@ -471,13 +518,13 @@ const App: React.FC = () => {
                             </div>
 
                             <Win95Button onClick={joinSession} className="w-full mt-6 py-4 text-lg font-bold">
-                                {status.includes('Connecting') ? 'SEARCHING...' : 'ESTABLISH LINK'}
+                                {status.includes('Dialing') ? 'CONNECTING...' : 'ESTABLISH LINK'}
                             </Win95Button>
                             
-                            {status.includes('Connecting') && (
+                            {status.includes('Dialing') && (
                                 <div className="mt-4 flex flex-col items-center justify-center text-xs text-gray-500 animate-pulse">
                                     <Globe size={24} className="mb-1 animate-spin"/>
-                                    Connecting to relay...
+                                    Dialing host frequency...
                                 </div>
                             )}
                         </div>
@@ -503,7 +550,7 @@ const App: React.FC = () => {
                 <span>CHAT_{sessionCode.substring(0,6)}</span>
             </div>
             <div className="flex items-center gap-3">
-                {status === 'Connected' ? <Wifi size={18} className="text-green-400"/> : <WifiOff size={18} className="text-red-400"/>}
+                {status === 'Connected' || status === 'Secure Link Est.' ? <Wifi size={18} className="text-green-400"/> : <WifiOff size={18} className="text-red-400"/>}
                 
                 <button 
                     onClick={() => {
@@ -533,8 +580,8 @@ const App: React.FC = () => {
              {messages.length === 0 && (
                 <div className="h-full flex flex-col items-center justify-center text-gray-300 opacity-60">
                     <ShieldCheck size={64} strokeWidth={1} />
-                    <p className="mt-4 text-2xl font-bold tracking-widest">SECURE</p>
-                    <p className="text-xs mt-2">CONNECTED VIA RELAY</p>
+                    <p className="mt-4 text-2xl font-bold tracking-widest">SECURE LINK</p>
+                    <p className="text-xs mt-2">ENCRYPTED CHANNEL OPEN</p>
                 </div>
             )}
             
