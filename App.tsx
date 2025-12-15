@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { DataConnection } from 'peerjs';
-import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2, Maximize2, Activity, Lock } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import mqtt from 'mqtt';
+import { Send, Copy, LogOut, Terminal, ShieldCheck, User, ArrowLeft, Wifi, WifiOff, AlertTriangle, Link as LinkIcon, Share2, Maximize2, Activity, Lock, Globe } from 'lucide-react';
 import { Win95Window, Win95Button, Win95Input, Win95Panel } from './components/RetroUI';
 import { encryptMessage, decryptMessage, generateRandomName, generateSessionCode, parseSessionCode } from './utils/crypto';
 import { Message, AppScreen, NetworkMessage } from './types';
@@ -28,15 +28,10 @@ const App: React.FC = () => {
   const [isRemoteTyping, setIsRemoteTyping] = useState<boolean>(false);
 
   // --- Refs ---
-  const peerRef = useRef<any>(null);
-  const connRef = useRef<DataConnection | null>(null);
+  const clientRef = useRef<mqtt.MqttClient | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const topicRef = useRef<string>('');
   
-  // Reconnect Refs
-  const reconnectTimeoutRef = useRef<any>(null);
-  const reconnectAttemptsRef = useRef<number>(0);
-  const MAX_RECONNECT_ATTEMPTS = 5;
-
   // Typing Refs
   const typingSendTimeoutRef = useRef<any>(null);
   const typingReceiveTimeoutRef = useRef<any>(null);
@@ -53,12 +48,14 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Cleanup on unmount
+  // Cleanup on unmount or screen change
   useEffect(() => {
       return () => {
-          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-          if (connRef.current) connRef.current.close();
-          if (peerRef.current) peerRef.current.destroy();
+          if (clientRef.current) {
+              try {
+                clientRef.current.end();
+              } catch(e) {}
+          }
       };
   }, []);
 
@@ -81,7 +78,6 @@ const App: React.FC = () => {
   // --- Handlers ---
 
   const initHostSession = async () => {
-      // 1. Generate a new code
       const newCode = generateSessionCode();
       const parsed = parseSessionCode(newCode);
       
@@ -92,121 +88,10 @@ const App: React.FC = () => {
 
       setSessionCode(parsed.rawCode);
       setRoomKey(parsed.key);
-      setStatus('Initializing...');
+      setStatus('Connecting to Relay...');
       setErrorMsg(null);
 
-      // 2. Initialize Peer with the specific ID from the code
-      await initializePeer(parsed.peerId);
-  };
-
-  const handlePeerError = (err: any) => {
-    console.error('Peer error:', err);
-    const type = err.type;
-
-    if (type === 'unavailable-id') {
-        if (isHost) {
-            setErrorMsg("ID collision. Retrying...");
-            setTimeout(initHostSession, 1000);
-        } else {
-            setErrorMsg("ID unavailable. Please retry.");
-        }
-    } else if (type === 'peer-unavailable') {
-        setErrorMsg("Session not found. Check code.");
-        setStatus("Error");
-    } else if (type === 'network' || type === 'server-error' || err.message === 'Lost connection to server') {
-        attemptReconnect();
-    } else {
-        if (status !== 'Reconnecting...') {
-            setErrorMsg(`Net Error: ${type || 'Unknown'}`);
-        }
-    }
-  };
-
-  const attemptReconnect = () => {
-    if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
-        reconnectAttemptsRef.current++;
-        setStatus(`Reconnecting (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
-        console.log(`Attempting reconnect ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS}`);
-        
-        if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-        
-        reconnectTimeoutRef.current = setTimeout(() => {
-            if (peerRef.current && !peerRef.current.destroyed) {
-                peerRef.current.reconnect();
-            } else {
-                // If peer is destroyed, we might need to fully re-init, 
-                // but usually reconnect() is for the signaling server connection.
-                // If destroyed, the user session is likely dead.
-                setErrorMsg("Connection fatal. Please restart.");
-            }
-        }, 5000); // 5 seconds delay
-    } else {
-        setStatus("Connection Lost");
-        setErrorMsg("Failed to reconnect after 5 attempts.");
-    }
-  };
-
-  const initializePeer = async (customId?: string) => {
-      // Cleanup old peer if exists
-      if (peerRef.current) {
-          peerRef.current.destroy();
-          peerRef.current = null;
-      }
-      reconnectAttemptsRef.current = 0; // Reset attempts on new init
-
-      try {
-            const peerModule = await import('peerjs');
-            const PeerCtor = peerModule.Peer || (peerModule as any).default || (window as any).Peer;
-            
-            if (!PeerCtor) throw new Error("PeerJS library error.");
-
-            const peerOptions: any = { 
-                debug: 1,
-                config: {
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:global.stun.twilio.com:3478' }
-                    ]
-                }
-            };
-            
-            const peer = customId 
-                ? new PeerCtor(customId, peerOptions) 
-                : new PeerCtor(undefined, peerOptions);
-
-            peer.on('open', (id: string) => {
-                console.log('My Peer ID:', id);
-                setStatus('Online');
-                setErrorMsg(null); 
-                reconnectAttemptsRef.current = 0; // Reset on successful open
-                
-                if (customId) {
-                    setStatus('Waiting for Peer...');
-                }
-            });
-
-            peer.on('connection', (conn: DataConnection) => {
-                console.log('Incoming connection:', conn.peer);
-                if (connRef.current && connRef.current.open) {
-                    conn.close();
-                    return;
-                }
-                setupConnectionListeners(conn);
-            });
-
-            peer.on('error', handlePeerError);
-
-            peer.on('disconnected', () => {
-                console.log("Peer disconnected from server.");
-                attemptReconnect();
-            });
-
-            peerRef.current = peer;
-
-      } catch (e: any) {
-          console.error(e);
-          setErrorMsg(`Failed to start network: ${e.message}`);
-      }
+      connectToMqtt(parsed.rawCode, parsed.key);
   };
 
   const joinSession = async () => {
@@ -222,121 +107,132 @@ const App: React.FC = () => {
       setSessionCode(parsed.rawCode);
       setRoomKey(parsed.key);
       setErrorMsg(null);
-      setStatus('Connecting...');
-
-      if (!peerRef.current || peerRef.current.destroyed) {
-          await initializePeer();
-          await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-
-      if (peerRef.current) {
-          try {
-            const conn = peerRef.current.connect(parsed.peerId, { reliable: true });
-            if (!conn) {
-                setErrorMsg("Connection failed to start.");
-                return;
-            }
-            setupConnectionListeners(conn);
-          } catch(e) {
-              setErrorMsg("Connection Error.");
-          }
-      }
+      setStatus('Connecting to Relay...');
+      
+      connectToMqtt(parsed.rawCode, parsed.key);
   };
 
-  const sendNotification = async (sender: string, text: string) => {
-      if (document.visibilityState === 'visible') return; 
-      if (!('Notification' in window)) return;
-      if (Notification.permission !== 'granted') return;
+  const connectToMqtt = (code: string, key: string) => {
+      // Disconnect if exists
+      if (clientRef.current) {
+          clientRef.current.end();
+      }
 
-      const title = `New Message from ${sender}`;
-      const body = text.length > 50 ? text.substring(0, 50) + '...' : text;
-      
+      // Architecture: MQTT over WebSockets.
+      // This uses a public broker but keeps messages E2EE encrypted.
+      // This works on 4G, Different Wifi, Different Countries because it uses standard HTTP ports.
+      const brokerUrl = 'wss://broker.hivemq.com:8000/mqtt';
+      const topic = `retrochat95/v1/channel/${code}`;
+      topicRef.current = topic;
+
+      console.log(`Connecting to ${brokerUrl} on topic ${topic}`);
+
       try {
-          if (navigator.serviceWorker && navigator.serviceWorker.ready) {
-              const reg = await navigator.serviceWorker.ready;
-              reg.showNotification(title, {
-                  body: body,
-                  icon: 'https://win98icons.alexmeub.com/icons/png/computer_explorer-5.png',
-                  tag: 'retro-chat-msg',
-                  vibrate: [200, 100, 200]
-              } as any);
-          } else {
-              new Notification(title, {
-                  body: body,
-                  icon: 'https://win98icons.alexmeub.com/icons/png/computer_explorer-5.png'
+          const client = mqtt.connect(brokerUrl, {
+              clientId: 'rc95_' + Math.random().toString(16).substr(2, 8),
+              keepalive: 60,
+              clean: true,
+              reconnectPeriod: 1000,
+          });
+
+          clientRef.current = client;
+
+          client.on('connect', () => {
+              console.log('MQTT Connected');
+              setStatus('Connected');
+              
+              // Subscribe to the specific room topic
+              client.subscribe(topic, (err) => {
+                  if (!err) {
+                      setScreen(AppScreen.CHAT);
+                      setErrorMsg(null);
+                      // Announce presence (encrypted)
+                      sendSystemAnnouncement(client, topic, key, "USER_JOINED");
+                  } else {
+                      setErrorMsg("Subscription Failed");
+                  }
               });
-          }
-      } catch (e) {
-          console.error("Notification failed", e);
+          });
+
+          client.on('message', async (topic, message) => {
+               try {
+                   // Message is Buffer, convert to string -> JSON
+                   const payloadStr = message.toString();
+                   const msg = JSON.parse(payloadStr) as NetworkMessage;
+
+                   // Ignore messages from myself
+                   if (msg.sender === username && msg.type !== 'SYSTEM') return;
+
+                   if (msg.type === 'TYPING') {
+                       handleRemoteTyping();
+                       return;
+                   }
+
+                   if (msg.type === 'CHAT' && msg.payload) {
+                       const decryptedText = await decryptMessage(msg.payload, key);
+                       addMessage(msg.sender || 'Unknown', decryptedText);
+                       sendNotification(msg.sender || 'User', decryptedText);
+                   }
+                   
+                   if (msg.type === 'SYSTEM' && msg.payload) {
+                       // Optional: Decrypt system messages if you want them secure too
+                       // For now assuming system messages might be plaintext status codes or encrypted
+                       // Let's assume encrypted for consistency
+                       try {
+                           const status = await decryptMessage(msg.payload, key);
+                           if (status === "USER_JOINED" && msg.sender !== username) {
+                               addSystemMessage(`${msg.sender} connected via Relay.`);
+                           }
+                       } catch(e) {}
+                   }
+
+               } catch (e) {
+                   console.error("Message processing error", e);
+               }
+          });
+
+          client.on('error', (err) => {
+              console.error('Connection error: ', err);
+              setStatus('Net Error');
+              setErrorMsg('Connection unstable. Retrying...');
+          });
+
+          client.on('offline', () => {
+              setStatus('Reconnecting...');
+          });
+
+      } catch (e: any) {
+          console.error("MQTT Error:", e);
+          setErrorMsg("Init Failed.");
       }
   };
 
-  const setupConnectionListeners = (conn: DataConnection) => {
-      connRef.current = conn;
-      
-      conn.on('open', () => {
-          setStatus('Connected');
-          setScreen(AppScreen.CHAT);
-          setErrorMsg(null);
-          reconnectAttemptsRef.current = 0; // Reset on successful peer connection
-      });
-
-      conn.on('data', async (data: any) => {
-          const msg = data as NetworkMessage;
-          
-          if (msg.type === 'TYPING') {
-              setIsRemoteTyping(true);
-              // Clear existing timeout
-              if (typingReceiveTimeoutRef.current) clearTimeout(typingReceiveTimeoutRef.current);
-              // Set new timeout to hide typing indicator after 3 seconds
-              typingReceiveTimeoutRef.current = setTimeout(() => {
-                  setIsRemoteTyping(false);
-              }, 3000);
-              return;
-          }
-
-          if (msg.type === 'CHAT' && msg.payload && msg.sender) {
-              try {
-                  // If we receive a message, they stopped typing (conceptually)
-                  setIsRemoteTyping(false); 
-                  const text = await decryptMessage(msg.payload, roomKeyRef.current);
-                  addMessage(msg.sender, text);
-                  sendNotification(msg.sender, text);
-              } catch (e) {
-                  addSystemMessage(`Could not decrypt message from ${msg.sender}.`);
-              }
-          }
-      });
-      
-      conn.on('close', () => {
-          setStatus('Disconnected');
-          addSystemMessage('Peer disconnected.');
-          connRef.current = null;
+  const handleRemoteTyping = () => {
+      setIsRemoteTyping(true);
+      if (typingReceiveTimeoutRef.current) clearTimeout(typingReceiveTimeoutRef.current);
+      typingReceiveTimeoutRef.current = setTimeout(() => {
           setIsRemoteTyping(false);
-      });
-      
-      conn.on('error', (err) => {
-          console.error("Conn error", err);
-          addSystemMessage("Connection error.");
-      });
+      }, 3000);
   };
 
   // Keep ref updated for callbacks
   const roomKeyRef = useRef(roomKey);
   useEffect(() => { roomKeyRef.current = roomKey; }, [roomKey]);
+  
+  // Use a ref for username to access in closures
+  const usernameRef = useRef(username);
+  useEffect(() => { usernameRef.current = username; }, [username]);
 
   // Handle typing indicator transmission
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       const val = e.target.value;
       setInputText(val);
 
-      // Send typing signal throttled (max once every 1 second)
-      if (val.length > 0 && connRef.current && connRef.current.open) {
+      if (val.length > 0 && clientRef.current?.connected) {
           if (!typingSendTimeoutRef.current) {
-              const typingMsg: NetworkMessage = { type: 'TYPING' };
-              connRef.current.send(typingMsg);
+              const msg: NetworkMessage = { type: 'TYPING', sender: usernameRef.current };
+              clientRef.current.publish(topicRef.current, JSON.stringify(msg));
               
-              // Prevent sending another typing signal for 1 second
               typingSendTimeoutRef.current = setTimeout(() => {
                   typingSendTimeoutRef.current = null;
               }, 1000);
@@ -344,14 +240,27 @@ const App: React.FC = () => {
       }
   };
 
+  const sendSystemAnnouncement = async (client: mqtt.MqttClient, topic: string, key: string, statusMsg: string) => {
+      try {
+          const encrypted = await encryptMessage(statusMsg, key);
+          const netMsg: NetworkMessage = {
+              type: 'SYSTEM',
+              sender: usernameRef.current,
+              payload: encrypted
+          };
+          client.publish(topic, JSON.stringify(netMsg));
+      } catch (e) {}
+  };
+
   const sendMessage = async () => {
       if (!inputText.trim()) return;
       
       const textToSend = inputText;
       setInputText('');
+      // Optimistically add to UI
       addMessage(username, textToSend);
 
-      if (connRef.current && connRef.current.open) {
+      if (clientRef.current && clientRef.current.connected) {
           try {
               const encrypted = await encryptMessage(textToSend, roomKey);
               const netMsg: NetworkMessage = {
@@ -359,12 +268,12 @@ const App: React.FC = () => {
                   sender: username,
                   payload: encrypted
               };
-              connRef.current.send(netMsg);
+              clientRef.current.publish(topicRef.current, JSON.stringify(netMsg));
           } catch (e) {
               addSystemMessage("Encryption failed.");
           }
       } else {
-          addSystemMessage("Not connected.");
+          addSystemMessage("Not connected to Relay.");
       }
   };
 
@@ -382,10 +291,28 @@ const App: React.FC = () => {
       addMessage('SYSTEM', content, true);
   };
 
+  const sendNotification = async (sender: string, text: string) => {
+      if (document.visibilityState === 'visible') return; 
+      if (!('Notification' in window)) return;
+      if (Notification.permission !== 'granted') return;
+
+      const title = `New Message from ${sender}`;
+      const body = text.length > 50 ? text.substring(0, 50) + '...' : text;
+      
+      try {
+          const icon = 'https://win98icons.alexmeub.com/icons/png/computer_explorer-5.png';
+          if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+              const reg = await navigator.serviceWorker.ready;
+              reg.showNotification(title, { body, icon, tag: 'retro-chat-msg', vibrate: [200] } as any);
+          } else {
+              new Notification(title, { body, icon });
+          }
+      } catch (e) {}
+  };
+
   const handleLogin = () => {
       if (!username) setUsername(generateRandomName());
       
-      // If pending join, go straight to join logic
       if (pendingJoinCode) {
           setIsHost(false);
           setScreen(AppScreen.SETUP);
@@ -400,9 +327,9 @@ const App: React.FC = () => {
 
   const switchMode = (host: boolean) => {
       setIsHost(host);
-      if (peerRef.current) {
-          peerRef.current.destroy();
-          peerRef.current = null;
+      if (clientRef.current) {
+          clientRef.current.end();
+          clientRef.current = null;
       }
       setSessionCode('');
       setJoinCodeInput('');
@@ -523,9 +450,10 @@ const App: React.FC = () => {
                                 </div>
                             </div>
                             
-                            <div className="mt-8 flex flex-col items-center justify-center gap-2 text-gray-600 animate-pulse">
-                                <Wifi size={32}/>
+                            <div className="mt-8 flex flex-col items-center justify-center gap-2 text-gray-600">
+                                <Globe size={32} className={status.includes('Reconnecting') || status.includes('Connecting') ? "animate-spin" : ""}/>
                                 <span className="font-bold">{status}</span>
+                                {status.includes('Connecting') && <span className="text-xs max-w-[200px] text-center">Contacting secure relay server...</span>}
                             </div>
                         </div>
                     ) : (
@@ -543,8 +471,15 @@ const App: React.FC = () => {
                             </div>
 
                             <Win95Button onClick={joinSession} className="w-full mt-6 py-4 text-lg font-bold">
-                                {status === 'Connecting...' ? 'CONNECTING...' : 'ESTABLISH LINK'}
+                                {status.includes('Connecting') ? 'SEARCHING...' : 'ESTABLISH LINK'}
                             </Win95Button>
+                            
+                            {status.includes('Connecting') && (
+                                <div className="mt-4 flex flex-col items-center justify-center text-xs text-gray-500 animate-pulse">
+                                    <Globe size={24} className="mb-1 animate-spin"/>
+                                    Connecting to relay...
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
@@ -599,7 +534,7 @@ const App: React.FC = () => {
                 <div className="h-full flex flex-col items-center justify-center text-gray-300 opacity-60">
                     <ShieldCheck size={64} strokeWidth={1} />
                     <p className="mt-4 text-2xl font-bold tracking-widest">SECURE</p>
-                    <p className="text-xs mt-2">WAITING FOR MESSAGES...</p>
+                    <p className="text-xs mt-2">CONNECTED VIA RELAY</p>
                 </div>
             )}
             
