@@ -123,8 +123,10 @@ const App: React.FC = () => {
       }
 
       try {
-          // Public WebSocket Trackers (Browsers need WSS, they cannot use UDP/TCP trackers)
-          // These are high-availability public trackers for WebTorrent/WebRTC
+          // BROWSER COMPATIBILITY NOTE:
+          // Browsers CANNOT use udp:// or http:// trackers due to security sandboxing.
+          // We MUST use wss:// (WebSocket Secure).
+          // Below is a curated list of high-uptime WSS trackers derived from your list and standard WebTorrent sources.
           const trackerUrls = [
             'wss://tracker.webtorrent.dev',
             'wss://tracker.openwebtorrent.com',
@@ -132,12 +134,25 @@ const App: React.FC = () => {
             'wss://open.tube/tracker/socket',
             'wss://tracker.sloppyta.co:443/announce',
             'wss://hub.bugout.link:443/announce',
-            'wss://tracker.btorrent.xyz'
+            'wss://tracker.btorrent.xyz',
+            // Converted SSL trackers from user list to WSS where applicable
+            'wss://tracker.yemekyedim.com:443/announce',
+            'wss://tracker.gcrenwp.top:443/announce',
+            'wss://tr.zukizuki.org:443/announce',
+            'wss://tracker.leechshield.link:443/announce'
           ];
 
           const config = { 
-              appId: 'retro-chat-95-global',
-              trackerUrls: trackerUrls
+              appId: 'retro-chat-95-global-v2', // Changed ID to ensure fresh peer discovery
+              trackerUrls: trackerUrls,
+              rtcConfig: {
+                iceServers: [
+                  { urls: 'stun:stun.l.google.com:19302' },
+                  { urls: 'stun:stun1.l.google.com:19302' },
+                  { urls: 'stun:stun2.l.google.com:19302' },
+                  { urls: 'stun:global.stun.twilio.com:3478' }
+                ]
+              }
           };
 
           const room = joinRoom(config, roomId);
