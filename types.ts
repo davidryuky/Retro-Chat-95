@@ -5,6 +5,7 @@ export interface Message {
   content: string;
   timestamp: number;
   isSystem?: boolean;
+  status?: 'sent' | 'read'; // Added status for checkmarks
 }
 
 export interface ChatSession {
@@ -27,7 +28,8 @@ export interface EncryptedPayload {
 }
 
 export interface NetworkMessage {
-  type: 'CHAT' | 'SYSTEM' | 'JOIN' | 'LEAVE' | 'TYPING';
+  type: 'CHAT' | 'SYSTEM' | 'JOIN' | 'LEAVE' | 'TYPING' | 'READ_RECEIPT';
   payload?: EncryptedPayload;
-  sender?: string; // Plaintext sender name (metadata is usually public in simple P2P, only content is encrypted)
+  sender?: string; // Plaintext sender name
+  messageId?: string; // ID for referencing messages (read receipts)
 }

@@ -38,6 +38,7 @@ const App: React.FC = () => {
   // Refs for closures
   const usernameRef = useRef<string>('');
   const roomKeyRef = useRef<string>('');
+  const messagesRef = useRef<Message[]>([]); // To access messages in event listeners
 
   // --- Effects ---
 
@@ -51,6 +52,7 @@ const App: React.FC = () => {
 
   useEffect(() => { usernameRef.current = username; }, [username]);
   useEffect(() => { roomKeyRef.current = roomKey; }, [roomKey]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   useEffect(() => {
       return () => {
@@ -68,6 +70,26 @@ const App: React.FC = () => {
     if (screen === AppScreen.CHAT && 'Notification' in window && Notification.permission === 'default') {
         Notification.requestPermission();
     }
+  }, [screen]);
+
+  // Handle visibility change to mark messages as read when user comes back
+  useEffect(() => {
+      const handleVisibilityChange = () => {
+          if (document.visibilityState === 'visible' && screen === AppScreen.CHAT) {
+              // Acknowledge all unread messages from remote sender
+              // We don't track "unread" locally strictly, so we just blindly ACK the last few incoming messages
+              // to ensure the sender gets their 'vv'.
+              const incoming = messagesRef.current.filter(m => m.sender !== usernameRef.current && !m.isSystem);
+              incoming.slice(-5).forEach(msg => {
+                  sendReadReceipt(msg.id);
+              });
+          }
+      };
+
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+      return () => {
+          document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
   }, [screen]);
 
   // --- Helper: Cleanup ---
@@ -88,17 +110,40 @@ const App: React.FC = () => {
       try {
           const msg = typeof data === 'string' ? JSON.parse(data) : data as NetworkMessage;
           
+          // 1. Handle Typing
           if (msg.type === 'TYPING') {
               handleRemoteTyping();
               return;
           }
 
-          if (msg.type === 'CHAT' && msg.payload) {
-              const decryptedText = await decryptMessage(msg.payload, roomKeyRef.current);
-              addMessage(msg.sender || 'Unknown', decryptedText);
-              sendNotification(msg.sender || 'User', decryptedText);
+          // 2. Handle Read Receipt (Sender side logic)
+          if (msg.type === 'READ_RECEIPT' && msg.messageId) {
+              setMessages(prev => prev.map(m => 
+                  m.id === msg.messageId ? { ...m, status: 'read' } : m
+              ));
+              return;
           }
 
+          // 3. Handle Chat Message (Receiver side logic)
+          if (msg.type === 'CHAT' && msg.payload) {
+              const decryptedText = await decryptMessage(msg.payload, roomKeyRef.current);
+              
+              // We use the ID sent by the sender if available, or generate one (though sender ID is better for receipts)
+              // Since existing code generated ID locally, let's fix that in sendMessage first.
+              // For now, assume msg.messageId exists or use payload as proxy (imperfect).
+              // Let's rely on the sender passing messageId in the NetworkMessage wrapper.
+              const msgId = msg.messageId || Date.now().toString();
+
+              addMessage(msg.sender || 'Unknown', decryptedText, false, msgId);
+              sendNotification(msg.sender || 'User', decryptedText);
+
+              // Send Read Receipt if visible
+              if (document.visibilityState === 'visible') {
+                  sendReadReceipt(msgId);
+              }
+          }
+
+          // 4. Handle System Message
           if (msg.type === 'SYSTEM' && msg.payload) {
               const statusText = await decryptMessage(msg.payload, roomKeyRef.current);
               addSystemMessage(statusText);
@@ -124,8 +169,6 @@ const App: React.FC = () => {
       setIsHost(true);
       setStatus('Initializing Node...');
 
-      // Create Peer with specific ID derived from Session Code
-      // We use a prefix to namespace our app on the public server
       const myPeerId = `rc95-v1-${parsed.rawCode}`;
 
       const peer = new Peer(myPeerId, {
@@ -141,17 +184,14 @@ const App: React.FC = () => {
       peerRef.current = peer;
 
       peer.on('open', (id) => {
-          console.log('Host ID:', id);
           setStatus('Waiting for Peer...');
       });
 
       peer.on('connection', (conn) => {
-          console.log('Incoming connection...');
           connRef.current = conn;
           setStatus('Negotiating...');
 
           conn.on('open', () => {
-              console.log('Connection Established!');
               setStatus('Connected');
               setScreen(AppScreen.CHAT);
               sendSystemMessage("Secure Connection Established.");
@@ -162,7 +202,6 @@ const App: React.FC = () => {
           conn.on('close', () => {
               addSystemMessage("Peer disconnected.");
               setStatus('Peer Left');
-              // Don't leave screen, just show error
           });
           
           conn.on('error', () => {
@@ -171,7 +210,6 @@ const App: React.FC = () => {
       });
 
       peer.on('error', (err) => {
-          console.error(err);
           if (err.type === 'unavailable-id') {
               setErrorMsg("Session Code Collision. Retry.");
           } else {
@@ -201,7 +239,6 @@ const App: React.FC = () => {
       setIsHost(false);
       setStatus('Locating Host...');
 
-      // Client gets random ID
       const peer = new Peer({
           debug: 1,
            config: {
@@ -214,19 +251,14 @@ const App: React.FC = () => {
       peerRef.current = peer;
 
       peer.on('open', (id) => {
-          console.log('Client ID:', id);
           setStatus('Dialing...');
-          
           const hostId = `rc95-v1-${parsed.rawCode}`;
           const conn = peer.connect(hostId, { reliable: true });
-          
           connRef.current = conn;
 
           conn.on('open', () => {
               setStatus('Connected');
               setScreen(AppScreen.CHAT);
-              
-              // Small delay to ensure host UI is ready
               setTimeout(() => {
                    sendSystemMessage("USER_JOINED");
               }, 500);
@@ -240,14 +272,12 @@ const App: React.FC = () => {
           });
           
           conn.on('error', (err) => {
-              console.error("Conn Error", err);
               setErrorMsg("Connection Failed");
               setStatus("Error");
           });
       });
 
       peer.on('error', (err) => {
-          console.error(err);
           setErrorMsg("Could not reach network.");
           setStatus("Error");
       });
@@ -265,16 +295,25 @@ const App: React.FC = () => {
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       setInputText(e.target.value);
-
       if (e.target.value.length > 0 && connRef.current?.open) {
           if (!typingSendTimeoutRef.current) {
               const msg: NetworkMessage = { type: 'TYPING', sender: usernameRef.current };
               connRef.current.send(JSON.stringify(msg));
-              
               typingSendTimeoutRef.current = setTimeout(() => {
                   typingSendTimeoutRef.current = null;
               }, 1000);
           }
+      }
+  };
+
+  const sendReadReceipt = (msgId: string) => {
+      if (connRef.current && connRef.current.open) {
+          const msg: NetworkMessage = {
+              type: 'READ_RECEIPT',
+              sender: usernameRef.current,
+              messageId: msgId
+          };
+          connRef.current.send(JSON.stringify(msg));
       }
   };
 
@@ -296,7 +335,11 @@ const App: React.FC = () => {
       if (!inputText.trim()) return;
       const text = inputText;
       setInputText('');
-      addMessage(username, text); // Optimistic UI
+      
+      const newMsgId = Date.now().toString() + Math.random().toString().slice(2, 6);
+      
+      // Add local message with 'sent' status
+      addMessage(username, text, false, newMsgId);
 
       if (connRef.current && connRef.current.open) {
           try {
@@ -304,7 +347,8 @@ const App: React.FC = () => {
               const msg: NetworkMessage = {
                   type: 'CHAT',
                   sender: username,
-                  payload: encrypted
+                  payload: encrypted,
+                  messageId: newMsgId // Critical: Send the ID so receiver can reference it in receipt
               };
               connRef.current.send(JSON.stringify(msg));
           } catch (e) {
@@ -315,13 +359,14 @@ const App: React.FC = () => {
       }
   };
 
-  const addMessage = (sender: string, content: string, isSystem = false) => {
+  const addMessage = (sender: string, content: string, isSystem = false, idOverride?: string) => {
       setMessages(prev => [...prev, {
-          id: Date.now().toString() + Math.random(),
+          id: idOverride || (Date.now().toString() + Math.random()),
           sender,
           content,
           timestamp: Date.now(),
-          isSystem
+          isSystem,
+          status: 'sent' // Default status
       }]);
   };
 
@@ -349,7 +394,6 @@ const App: React.FC = () => {
   };
 
   // --- UI Helpers ---
-
   const handleLogin = () => {
       if (!username) setUsername(generateRandomName());
       if (pendingJoinCode) {
@@ -603,11 +647,18 @@ const App: React.FC = () => {
                             >
                                 {msg.content}
                             </div>
-                            <div className="flex items-center gap-1 mt-1 px-1 opacity-60 select-none">
+                            <div className="flex items-center gap-1 mt-1 px-1 opacity-60 select-none justify-end w-full">
                                 <span className="text-[10px] text-gray-400">
                                     {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                                 </span>
-                                <Lock size={10} className="text-gray-400" />
+                                
+                                {msg.sender === username && (
+                                    <span className={`ml-1 font-bold text-[10px] tracking-tighter ${msg.status === 'read' ? 'text-green-600' : 'text-gray-400'}`}>
+                                        {msg.status === 'read' ? 'vv' : 'v'}
+                                    </span>
+                                )}
+
+                                {msg.sender !== username && <Lock size={10} className="text-gray-400" />}
                             </div>
                         </div>
                     )}
