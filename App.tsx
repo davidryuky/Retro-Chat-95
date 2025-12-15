@@ -123,10 +123,23 @@ const App: React.FC = () => {
       }
 
       try {
-          // Trystero: Application becomes the P2P. 
-          // 'retro-chat-95' is the AppID namespace. 
-          // roomId is the unique session channel.
-          const config = { appId: 'retro-chat-95-global' };
+          // Public WebSocket Trackers (Browsers need WSS, they cannot use UDP/TCP trackers)
+          // These are high-availability public trackers for WebTorrent/WebRTC
+          const trackerUrls = [
+            'wss://tracker.webtorrent.dev',
+            'wss://tracker.openwebtorrent.com',
+            'wss://tracker.files.fm:7073/announce',
+            'wss://open.tube/tracker/socket',
+            'wss://tracker.sloppyta.co:443/announce',
+            'wss://hub.bugout.link:443/announce',
+            'wss://tracker.btorrent.xyz'
+          ];
+
+          const config = { 
+              appId: 'retro-chat-95-global',
+              trackerUrls: trackerUrls
+          };
+
           const room = joinRoom(config, roomId);
           roomRef.current = room;
 
@@ -144,7 +157,7 @@ const App: React.FC = () => {
               setStatus('Connected');
               setScreen(AppScreen.CHAT);
               setErrorMsg(null);
-              addSystemMessage("Secure link established.");
+              addSystemMessage("Secure link established via Tracker.");
           });
 
           room.onPeerLeave((peerId: string) => {
